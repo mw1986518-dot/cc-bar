@@ -67,6 +67,7 @@ nonisolated struct ScanState: Sendable, Equatable, Codable {
     ///      且 fork 文件的用量此前错归到父会话 key；旧桶已被污染，必须全量重建。
     /// v15: 新增 DSH 本地用量服务（`dsh` watermark 与逐会话贡献缓存）。
     ///      日 / 对话 rollup 同步 bump（10 / 8），首版落地使旧扫描状态与旧 rollup 一起失效（§7 S4）。
+    /// OpenCode v1/v2 使用可选 opencode 分区与独立子版本迁移，不使其他服务缓存失效。
     static let currentVersion: Int = 15
     var version: Int = ScanState.currentVersion
     var generationID: String = ""
@@ -82,10 +83,12 @@ nonisolated struct ScanState: Sendable, Equatable, Codable {
     /// pi 扫描 watermark；pi 会话树分支/复制场景按 (entryID@ISO timestamp) 全局去重。
     var pi: [String: ScanFileState] = [:]
     var piSeenEntryIds: [String] = []
-    /// opencode 扫描 watermark：max(message.time_created)（Unix 毫秒），消息只追加。
+    /// 旧版 OpenCode watermark，仅保留解码兼容；新扫描器不再依赖创建时间 / seen 集。
     var opencodeLastMessageTime: Int64 = 0
-    /// 跨会话的 opencode message.id 去重集合（compaction 重写 / 时间戳回跳兜底）。
     var opencodeSeenMessageIds: [String] = []
+    /// OpenCode v1/v2 逐会话变动签名。可选字段兼容 v15 缓存；nil 时仅重建 OpenCode。
+    /// 贡献保存在同代 conversation-rollup 中，签名必须与日 / 对话聚合一起提交。
+    var opencode: OpencodeScanner.State?
     /// DSH 扫描 watermark：按规范日志文件路径记录；generation 切换淘汰的文件不再续扫。
     var dsh: [String: ScanFileState] = [:]
 }

@@ -231,7 +231,7 @@ final class UsageEquivalenceTests: XCTestCase {
         let opencodeDB = rootURL.appendingPathComponent("opencode.db", isDirectory: false)
             .resolvingSymlinksInPath()
         if fm.fileExists(atPath: opencodeDB.path) {
-            let result = OpencodeScanner.scan(lastMessageTime: 0, seenMessageIds: [], databaseURL: opencodeDB)
+            let result = OpencodeScanner.scan(previous: nil, databaseURL: opencodeDB)
             lines.append(Self.opencodeSummary(result))
         }
 

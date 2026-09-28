@@ -1,36 +1,43 @@
 import Foundation
 import SQLite3
 
-/// 扫 OpenCode 的 SQLite 会话库（`~/.local/share/opencode/opencode.db`，Desktop / CLI 共用）。
-///
-/// OpenCode 不是订阅服务、没有额度；其会话库通常带聚合好的 token 与 cost，缺价时仍可
-/// 复用统一 Pricing 的在线目录 / 本地价格表补算；
-/// 定位与 Pi 一致：只进主窗口本地用量统计，不进额度轮询 / 菜单栏 / Popover / 悬浮窗 / Timeline。
-///
-/// 解析规则：
-///   - `message` 表每行一条消息，`data` JSON：user 消息带嵌套 `model{providerID, modelID, variant}`，
-///     assistant 消息自身带顶层 `providerID` / `modelID`；模型标签优先读消息自身字段，
-///     读不到时回退到会话内最近 user 消息继承的模型（避免增量扫描时标签丢失）。
-///   - assistant 消息带 `cost`（USD）与 `tokens{input, output, reasoning, cache{read, write}}`。
-///   - reasoning 并入 output（与 Claude / Codex 的 output 含 thinking 口径一致）。
-///   - 模型标签格式 `providerID/modelID`（对齐 Pi 的 `provider/model`），variant 不拼入。
-///   - 费用：有效官方 `cost`（大于 0）优先，价格表只用于估算四项占比并按
-///     官方总额缩放；缺失或为 0 且有 Token 时由统一 Pricing 补算总额。
-///     最终总额与分项总额始终一致，查不到价格时按 0 展示。
-///   - `session` 表提供 title / directory，`workspace` 表提供 branch；空标题用该会话
-///     首条 text part 兜底。
-///
-/// 增量逻辑：watermark 为 `max(message.time_created)`（Unix 毫秒），查询 `>= watermark`
-/// 并按 message.id 全局去重兜底 compaction / 时间戳回跳；被删除的会话不回扫（与 JSONL
-/// append-only 假设一致）。只读打开（SQLITE_OPEN_READONLY），与 OpenCode 运行中的写入
-/// 通过 WAL 并发安全；库缺失 / 打开失败 / 表结构不符时 no-op 返回原状态。
+/// 只读 OpenCode v1 / v2 会话库。变动会话重读全部已完成消息，调用方替换该会话贡献。
+/// 两套表共存时按消息 ID 优先采用 v2；缓存只存变动签名，不保存消息正文。
 enum OpencodeScanner {
+    nonisolated struct MessageSignature: Sendable, Codable, Equatable {
+        var count: Int64
+        var updated: Int64
+        var updatedSum: Int64
+        var created: Int64
+    }
+
+    nonisolated struct SessionState: Sendable, Codable, Equatable {
+        var legacy: MessageSignature?
+        var v2: MessageSignature?
+        var title: String?
+        var directory: String
+        var branch: String?
+        var updated: Int64
+        /// 未完成 assistant 不入账；更新签名变化后重新读取，供诊断保留待完成状态。
+        var hasPendingMessages = false
+    }
+
+    nonisolated struct State: Sendable, Codable, Equatable {
+        static let currentVersion = 1
+        var version = Self.currentVersion
+        var sourcePath: String
+        var sessions: [String: SessionState] = [:]
+    }
+
     struct Result: Sendable {
-        var entries: [UsageEntry]
-        var conversationSeeds: [ConversationSeed]
-        var newLastMessageTime: Int64
-        var newSeenMessageIds: [String]
-        var messagesRead: Int
+        /// 本轮刷新会话的完整贡献，不能作为新增条目累加。
+        var entries: [UsageEntry] = []
+        var conversationSeeds: [ConversationSeed] = []
+        var refreshedSessionIDs: Set<String> = []
+        var newState: State?
+        var messagesRead = 0
+        var error: String?
+        var isComplete = false
     }
 
     nonisolated static func defaultDatabaseURL() -> URL {
@@ -39,227 +46,244 @@ enum OpencodeScanner {
     }
 
     nonisolated static func scan(
-        lastMessageTime: Int64,
-        seenMessageIds: [String],
+        previous: State?,
+        databaseURL: URL = defaultDatabaseURL(),
         onProgress: ScanProgressCallback? = nil
     ) -> Result {
-        scan(
-            lastMessageTime: lastMessageTime,
-            seenMessageIds: seenMessageIds,
-            databaseURL: defaultDatabaseURL(),
-            onProgress: onProgress
-        )
-    }
-
-    /// 可注入库路径，供测试用临时 SQLite fixture 验证真实增量链路。
-    /// - Parameter onProgress: 非 nil 时按约每 200 条消息回报一次扫描进度。
-    ///   SQLite 库无法预知总行数，`filesTotal` 固定为 0 表示未知。
-    nonisolated static func scan(
-        lastMessageTime: Int64,
-        seenMessageIds: [String],
-        databaseURL: URL,
-        onProgress: ScanProgressCallback? = nil
-    ) -> Result {
+        // 未安装或暂时移走数据库时保留统计与状态；不把“缺文件”误报成空库。
         guard FileManager.default.fileExists(atPath: databaseURL.path) else {
-            return Result(
-                entries: [],
-                conversationSeeds: [],
-                newLastMessageTime: lastMessageTime,
-                newSeenMessageIds: seenMessageIds,
-                messagesRead: 0
-            )
+            return Result(newState: previous)
         }
-
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else {
-            if let db { sqlite3_close(db) }
-            return Result(
-                entries: [],
-                conversationSeeds: [],
-                newLastMessageTime: lastMessageTime,
-                newSeenMessageIds: seenMessageIds,
-                messagesRead: 0
-            )
+        var opened: OpaquePointer?
+        guard sqlite3_open_v2(databaseURL.path, &opened, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+              let db = opened else {
+            if let opened { sqlite3_close(opened) }
+            return Result(newState: previous, error: "OpenCode database could not be opened")
         }
         defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 2000)
 
-        let messageSQL = """
-        SELECT m.id, m.session_id, m.time_created, m.data, s.title, s.directory, w.branch
-        FROM message m
-        JOIN session s ON s.id = m.session_id
-        LEFT JOIN workspace w ON w.id = s.workspace_id
-        WHERE m.time_created >= ?1
-        ORDER BY m.time_created, m.id
-        """
-        guard let stmt = prepare(db, sql: messageSQL, bind: { sqlite3_bind_int64($0, 1, lastMessageTime) }) else {
-            // 表结构不符（OpenCode 未来版本可能迁移）：本轮 no-op，保留原 watermark。
-            return Result(
-                entries: [],
-                conversationSeeds: [],
-                newLastMessageTime: lastMessageTime,
-                newSeenMessageIds: seenMessageIds,
-                messagesRead: 0
-            )
-        }
+        do {
+            // 元数据签名和正文必须来自同一个 WAL 读快照，避免扫描期间写入导致漏算。
+            try execute(db, sql: "BEGIN")
+            defer { sqlite3_exec(db, "ROLLBACK", nil, nil, nil) }
+            let legacy = try source(db, messageTable: "message", sessionTable: "session", isV2: false)
+            let v2 = try source(db, messageTable: "session_message", sessionTable: "session_v2", isV2: true)
+            guard legacy != nil || v2 != nil else { throw ReadFailure(detail: "unsupported session schema") }
+            let sources = [legacy, v2].compactMap { $0 }
+            let workspaceColumns = try columns(db, table: "workspace")
+            let hasBranch = workspaceColumns.isSuperset(of: ["id", "branch"])
+            var sessions: [String: SessionState] = [:]
+            for source in sources {
+                try readSessions(db, source: source, hasBranch: hasBranch, into: &sessions)
+            }
 
-        var entries: [UsageEntry] = []
-        var seen = SeenIDSet(seenMessageIds)
-        var lastTime = lastMessageTime
-        var messagesRead = 0
-        var lastModelBySession: [String: String] = [:]
-        var sessionsWithEntries: Set<String> = []
-        var sessionMeta: [String: SessionMeta] = [:]
-
-        // 每批 256 行一个 autoreleasepool：逐行 JSONSerialization 产生的 Objective-C
-        // 临时对象在长任务里不会一直挂在线程上，全量扫描内存峰值显著下降。
-        var reachedEnd = false
-        while !reachedEnd {
-            autoreleasepool {
-                var batch = 0
-                while batch < 256, sqlite3_step(stmt) == SQLITE_ROW {
-                    batch += 1
-                    messagesRead += 1
-                    if messagesRead % 200 == 0 {
-                        onProgress?(ScanProgress(
-                            app: .opencode,
-                            filesCompleted: messagesRead,
-                            filesTotal: 0,
-                            linesParsed: messagesRead
+            let baseline = previous?.version == State.currentVersion
+                && previous?.sourcePath == databaseURL.path ? previous : nil
+            // 源库中删除的会话保留旧签名和 rollup；历史不因源文件清理而倒扣。
+            var state = baseline ?? State(sourcePath: databaseURL.path)
+            var result = Result(newState: previous)
+            var projectResolver = ConversationProjectResolver()
+            for id in sessions.keys.sorted() {
+                guard var session = sessions[id] else { continue }
+                if let old = baseline?.sessions[id] {
+                    session.hasPendingMessages = old.hasPendingMessages
+                    if old == session { continue }
+                }
+                session.hasPendingMessages = false
+                var entries: [UsageEntry] = []
+                var inheritedModel: String?
+                var fallbackTitle: String?
+                for source in sources {
+                    let exclusion = !source.isV2 && v2 != nil
+                        ? "AND NOT EXISTS (SELECT 1 FROM session_message v JOIN session_v2 s ON s.id = v.session_id WHERE v.id = m.id)"
+                        : ""
+                    let role = source.isV2 ? "m.type" : "NULL"
+                    let sql = """
+                    SELECT m.id, m.time_created, m.data, \(role)
+                    FROM \(source.messageTable) m
+                    WHERE m.session_id = ?1 \(exclusion)
+                    ORDER BY m.time_created, m.id
+                    """
+                    try rows(db, sql: sql, sessionID: id) { stmt in
+                        result.messagesRead += 1
+                        if result.messagesRead % 200 == 0 {
+                            onProgress?(ScanProgress(app: .opencode, filesCompleted: result.messagesRead,
+                                                     filesTotal: 0, linesParsed: result.messagesRead))
+                        }
+                        guard let data = columnText(stmt, 2),
+                              let json = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [String: Any]
+                        else { throw ReadFailure(detail: "invalid message JSON") }
+                        let role = columnText(stmt, 3) ?? (json["role"] as? String)
+                        if role == "user" {
+                            inheritedModel = parseModel(json["model"]) ?? inheritedModel
+                            if fallbackTitle == nil {
+                                fallbackTitle = ConversationTitleIndex.clean(json["text"] as? String)
+                            }
+                            return
+                        }
+                        guard role == "assistant" else { return }
+                        // v1 的真实消息也有 time.completed；流式半成品不提前入账。
+                        let time = json["time"] as? [String: Any]
+                        guard (time?["completed"] as? NSNumber)?.int64Value != nil else {
+                            session.hasPendingMessages = true
+                            return
+                        }
+                        // 已完成但没有用量的失败请求属于正常记录。
+                        guard let tokens = json["tokens"] as? [String: Any] else { return }
+                        let input = intValue(tokens["input"])
+                        let output = intValue(tokens["output"]) + intValue(tokens["reasoning"])
+                        let cache = tokens["cache"] as? [String: Any] ?? [:]
+                        let read = intValue(cache["read"])
+                        let write = intValue(cache["write"])
+                        let total = max(intValue(tokens["total"]), input + output + read + write)
+                        let cost = decimalValue(json["cost"])
+                        guard total > 0 || (cost ?? 0) > 0 else { return }
+                        let model = parseModel(source.isV2 ? json["model"] : json)
+                            ?? inheritedModel ?? "unknown/unknown"
+                        entries.append(makeEntry(
+                            conversationID: id, model: model,
+                            timestamp: Date(timeIntervalSince1970: Double(sqlite3_column_int64(stmt, 1)) / 1000),
+                            input: input, output: output, cacheRead: read, cacheWrite: write,
+                            totalTokens: total, cost: cost
                         ))
                     }
-                    guard let messageID = columnText(stmt, 0),
-                          let sessionID = columnText(stmt, 1) else { continue }
-                    let timeCreated = sqlite3_column_int64(stmt, 2)
-                    guard let data = columnText(stmt, 3),
-                          let json = try? JSONSerialization.jsonObject(
-                            with: Data(data.utf8)
-                          ) as? [String: Any] else { continue }
-                    let title = columnText(stmt, 4)
-                    let directory = columnText(stmt, 5) ?? ""
-                    let branch = columnText(stmt, 6)
-
-                    lastTime = max(lastTime, timeCreated)
-                    let role = json["role"] as? String
-                    if role == "user" {
-                        // user 消息带嵌套 `model` 对象，继承给后续 assistant 兜底。
-                        if let model = parseModel(json["model"]) {
-                            lastModelBySession[sessionID] = model
-                        }
-                        continue
-                    }
-                    guard role == "assistant" else { continue }
-                    if seen.contains(messageID) { continue }
-                    seen.insert(messageID)
-
-                    guard let tokens = json["tokens"] as? [String: Any] else { continue }
-                    let cost = decimalValue(json["cost"])
-                    let input = intValue(tokens["input"])
-                    let output = intValue(tokens["output"]) + intValue(tokens["reasoning"])
-                    let cache = tokens["cache"] as? [String: Any] ?? [:]
-                    let cacheRead = intValue(cache["read"])
-                    let cacheWrite = intValue(cache["write"])
-                    let totalTokens = max(
-                        intValue(tokens["total"]),
-                        input + output + cacheRead + cacheWrite
-                    )
-                    // total 为 0 且无 cost（或官方 cost 为 0）的消息（工具调用收尾等）不产生用量。
-                    if totalTokens <= 0 && (cost == nil || cost == 0) { continue }
-
-                    // assistant 消息自身带顶层 providerID/modelID，优先于会话继承的 user 模型；
-                    // 增量扫描只追加 assistant 时继承为空，靠自身字段保证标签不丢。
-                    let model = parseModel(json) ?? lastModelBySession[sessionID] ?? "unknown/unknown"
-                    let timestamp = Date(timeIntervalSince1970: Double(timeCreated) / 1000)
-                    entries.append(makeEntry(
-                        conversationID: sessionID,
-                        model: model,
-                        timestamp: timestamp,
-                        input: input,
-                        output: output,
-                        cacheRead: cacheRead,
-                        cacheWrite: cacheWrite,
-                        totalTokens: totalTokens,
-                        cost: cost
-                    ))
-                    sessionsWithEntries.insert(sessionID)
-                    if sessionMeta[sessionID] == nil {
-                        sessionMeta[sessionID] = SessionMeta(title: title, directory: directory, branch: branch)
-                    }
                 }
-                if batch < 256 { reachedEnd = true }
+                if fallbackTitle == nil, nonEmpty(session.title) == nil, legacy != nil {
+                    fallbackTitle = try legacyTitle(db, sessionID: id)
+                }
+                result.entries.append(contentsOf: entries)
+                result.refreshedSessionIDs.insert(id)
+                if !entries.isEmpty {
+                    result.conversationSeeds.append(ConversationSeed(
+                        key: "opencode:\(id)", id: id, app: .opencode,
+                        title: nonEmpty(session.title) ?? fallbackTitle,
+                        project: projectResolver.resolve(rawPath: session.directory, source: .cwd),
+                        gitBranch: nonEmpty(session.branch), sourcePath: databaseURL.path,
+                        includesSubtasks: false, cacheCreationAvailable: true
+                    ))
+                }
+                state.sessions[id] = session
             }
+            result.newState = state
+            result.isComplete = true
+            return result
+        } catch {
+            // 部分查询成功也不能提交部分贡献或签名；下轮从原状态重试。
+            return Result(newState: previous, error: "OpenCode database read failed: \(error)")
         }
-        sqlite3_finalize(stmt)
-
-        let fallbackTitles = fallbackTitles(db, for: Set(sessionMeta.filter {
-            $0.value.title == nil || $0.value.title!.isEmpty
-        }.keys))
-
-        var seeds: [String: ConversationSeed] = [:]
-        var projectResolver = ConversationProjectResolver()
-        for sessionID in sessionsWithEntries {
-            guard let meta = sessionMeta[sessionID] else { continue }
-            let resolvedTitle = nonEmpty(meta.title) ?? fallbackTitles[sessionID]
-            seeds["opencode:\(sessionID)"] = ConversationSeed(
-                key: "opencode:\(sessionID)",
-                id: sessionID,
-                app: .opencode,
-                title: resolvedTitle,
-                project: projectResolver.resolve(rawPath: meta.directory, source: .cwd),
-                gitBranch: nonEmpty(meta.branch),
-                sourcePath: databaseURL.path,
-                includesSubtasks: false,
-                cacheCreationAvailable: true
-            )
-        }
-
-        // 控制全局 seen 集合大小：按插入顺序保留最近 N 条（与 Claude / Pi scanner 一致）。
-        let cappedSeen = seen.capped(to: SeenIDSet.defaultLimit)
-
-        return Result(
-            entries: entries,
-            conversationSeeds: Array(seeds.values),
-            newLastMessageTime: lastTime,
-            newSeenMessageIds: cappedSeen,
-            messagesRead: messagesRead
-        )
     }
 
-    /// 会话静态信息快照（来自 session / workspace 表）。
-    private nonisolated struct SessionMeta {
+    private nonisolated struct Source {
+        var messageTable: String
+        var sessionTable: String
+        var isV2: Bool
+        var hasWorkspaceID: Bool
+        var hasSessionUpdated: Bool
+    }
+
+    private nonisolated struct ReadFailure: Error, CustomStringConvertible {
+        var detail: String
+        var description: String { detail }
+    }
+
+    private nonisolated static func source(
+        _ db: OpaquePointer, messageTable: String, sessionTable: String, isV2: Bool
+    ) throws -> Source? {
+        let messages = try columns(db, table: messageTable)
+        let sessions = try columns(db, table: sessionTable)
+        guard !messages.isEmpty || !sessions.isEmpty else { return nil }
+        var required: Set<String> = ["id", "session_id", "time_created", "time_updated", "data"]
+        if isV2 { required.insert("type") }
+        guard messages.isSuperset(of: required),
+              sessions.isSuperset(of: ["id", "title", "directory"])
+        else { throw ReadFailure(detail: "unsupported \(messageTable) schema") }
+        return Source(messageTable: messageTable, sessionTable: sessionTable, isV2: isV2,
+                      hasWorkspaceID: sessions.contains("workspace_id"),
+                      hasSessionUpdated: sessions.contains("time_updated"))
+    }
+
+    private nonisolated static func readSessions(
+        _ db: OpaquePointer, source: Source, hasBranch: Bool, into sessions: inout [String: SessionState]
+    ) throws {
+        let branch = hasBranch && source.hasWorkspaceID ? "w.branch" : "NULL"
+        let join = hasBranch && source.hasWorkspaceID ? "LEFT JOIN workspace w ON w.id = s.workspace_id" : ""
+        let updated = source.hasSessionUpdated ? "s.time_updated" : "0"
+        let sql = """
+        SELECT s.id, s.title, s.directory, \(branch), \(updated),
+               COUNT(m.id), COALESCE(MAX(m.time_updated), 0), COALESCE(SUM(m.time_updated), 0),
+               COALESCE(MAX(m.time_created), 0)
+        FROM \(source.sessionTable) s
+        LEFT JOIN \(source.messageTable) m ON m.session_id = s.id
+        \(join)
+        GROUP BY s.id
+        """
+        try rows(db, sql: sql) { stmt in
+            guard let id = columnText(stmt, 0) else { throw ReadFailure(detail: "missing session ID") }
+            let signature = MessageSignature(count: sqlite3_column_int64(stmt, 5),
+                                             updated: sqlite3_column_int64(stmt, 6),
+                                             updatedSum: sqlite3_column_int64(stmt, 7),
+                                             created: sqlite3_column_int64(stmt, 8))
+            var state = sessions[id] ?? SessionState(directory: "", updated: 0)
+            if source.isV2 { state.v2 = signature } else { state.legacy = signature }
+            // v2 元数据优先；空 title / directory 可沿用旧版。
+            state.title = nonEmpty(columnText(stmt, 1)) ?? state.title
+            state.directory = nonEmpty(columnText(stmt, 2)) ?? state.directory
+            state.branch = nonEmpty(columnText(stmt, 3)) ?? state.branch
+            state.updated = max(state.updated, sqlite3_column_int64(stmt, 4))
+            sessions[id] = state
+        }
+    }
+
+    private nonisolated static func columns(_ db: OpaquePointer, table: String) throws -> Set<String> {
+        var result: Set<String> = []
+        try rows(db, sql: "PRAGMA table_info(\(table))") { stmt in
+            if let name = columnText(stmt, 1) { result.insert(name) }
+        }
+        return result
+    }
+
+    private nonisolated static func rows(
+        _ db: OpaquePointer, sql: String, sessionID: String? = nil,
+        body: (OpaquePointer) throws -> Void
+    ) throws {
+        guard let stmt = prepare(db, sql: sql, bind: { stmt in
+            if let sessionID { sqlite3_bind_text(stmt, 1, sessionID, -1, sqliteTransient) }
+        }) else { throw ReadFailure(detail: String(cString: sqlite3_errmsg(db))) }
+        defer { sqlite3_finalize(stmt) }
+        var status = sqlite3_step(stmt)
+        while status == SQLITE_ROW {
+            try autoreleasepool { try body(stmt) }
+            status = sqlite3_step(stmt)
+        }
+        guard status == SQLITE_DONE else { throw ReadFailure(detail: String(cString: sqlite3_errmsg(db))) }
+    }
+
+    private nonisolated static func execute(_ db: OpaquePointer, sql: String) throws {
+        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+            throw ReadFailure(detail: String(cString: sqlite3_errmsg(db)))
+        }
+    }
+
+    private nonisolated static func legacyTitle(_ db: OpaquePointer, sessionID: String) throws -> String? {
+        guard try columns(db, table: "part").isSuperset(of: ["session_id", "time_created", "id", "data"]) else {
+            return nil
+        }
         var title: String?
-        var directory: String
-        var branch: String?
+        try rows(db, sql: "SELECT data FROM part WHERE session_id = ?1 ORDER BY time_created, id LIMIT 1",
+                 sessionID: sessionID) { stmt in
+            if let data = columnText(stmt, 0),
+               let json = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [String: Any],
+               json["type"] as? String == "text" {
+                title = ConversationTitleIndex.clean(json["text"] as? String)
+            }
+        }
+        return title
     }
 
     /// SQLITE_TRANSIENT 是 C 宏，Swift 中须经 unsafeBitCast 表达「SQLite 自行拷贝文本」。
     private nonisolated static let sqliteTransient: sqlite3_destructor_type =
         unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-
-    /// 空标题会话的首条 text part 作为标题兜底；查询只对少量会话执行。
-    private nonisolated static func fallbackTitles(
-        _ db: OpaquePointer,
-        for sessionIDs: Set<String>
-    ) -> [String: String] {
-        guard !sessionIDs.isEmpty else { return [:] }
-        var result: [String: String] = [:]
-        let sql = "SELECT data FROM part WHERE session_id = ?1 ORDER BY time_created, id LIMIT 1"
-        for sessionID in sessionIDs {
-            guard let stmt = prepare(db, sql: sql, bind: { sqlite3_bind_text($0, 1, sessionID, -1, sqliteTransient) }) else {
-                continue
-            }
-            if sqlite3_step(stmt) == SQLITE_ROW,
-               let data = columnText(stmt, 0),
-               let json = try? JSONSerialization.jsonObject(
-                 with: Data(data.utf8)
-               ) as? [String: Any],
-               (json["type"] as? String) == "text",
-               let title = ConversationTitleIndex.clean(json["text"] as? String) {
-                result[sessionID] = title
-            }
-            sqlite3_finalize(stmt)
-        }
-        return result
-    }
 
     private nonisolated static func prepare(
         _ db: OpaquePointer,
@@ -283,13 +307,12 @@ enum OpencodeScanner {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// 模型标签解析：user 消息用嵌套 `model{providerID, modelID, variant}`，
-    /// assistant 消息用顶层 `providerID` / `modelID`；两种结构均可直接解析。
+    /// v1 使用 providerID/modelID，v2 嵌套 model 使用 providerID/id。
     /// 标签格式 `providerID/modelID`；variant 不拼入。
     private nonisolated static func parseModel(_ value: Any?) -> String? {
         let dict = value as? [String: Any]
         guard let providerID = dict?["providerID"] as? String, !providerID.isEmpty,
-              let modelID = dict?["modelID"] as? String, !modelID.isEmpty else { return nil }
+              let modelID = (dict?["modelID"] ?? dict?["id"]) as? String, !modelID.isEmpty else { return nil }
         return "\(providerID)/\(modelID)"
     }
 

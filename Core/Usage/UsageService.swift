@@ -974,8 +974,7 @@ final class UsageService {
         }.value
         async let opencodeTask = Task.detached(priority: .utility) {
             OpencodeScanner.scan(
-                lastMessageTime: prev.opencodeLastMessageTime,
-                seenMessageIds: prev.opencodeSeenMessageIds,
+                previous: prev.opencode,
                 onProgress: progress
             )
         }.value
@@ -997,11 +996,13 @@ final class UsageService {
         aggregator.ingestLocal(claude.entries)
         aggregator.ingestLocal(codex.entries)
         aggregator.ingestLocal(pi.entries)
-        aggregator.ingestLocal(opencode.entries)
         let cycleEntries = claude.entries + codex.entries
+        let opencodeChanged = Self.applyOpenCodeScan(
+            opencode, aggregator: aggregator, conversations: conversationAggregator
+        )
         let conversationChanged = conversationAggregator.ingest(
-            entries: claude.entries + codex.entries + pi.entries + opencode.entries,
-            seeds: claude.conversationSeeds + codex.conversationSeeds + pi.conversationSeeds + opencode.conversationSeeds
+            entries: claude.entries + codex.entries + pi.entries,
+            seeds: claude.conversationSeeds + codex.conversationSeeds + pi.conversationSeeds
         )
 
         // 个人历史用量一次性补录：缓存失效路径会清空聚合器，若只在 bootstrap 合并，
@@ -1064,7 +1065,7 @@ final class UsageService {
 
         // 没有真实用量或档案变化时沿用现有代次，只提交轻量 watermark。
         let hasNewEntries = !claude.entries.isEmpty || !codex.entries.isEmpty
-            || !pi.entries.isEmpty || !opencode.entries.isEmpty || dshUpdate.changed || dshRebuildReady
+            || !pi.entries.isEmpty || opencodeChanged || dshUpdate.changed || dshRebuildReady
         if hasNewEntries || conversationChanged { hasUnwrittenRollupChanges = true }
         // 尚未建立代次时必须立刻落盘，否则内存与磁盘无从对齐。
         let mustWriteRollups = loadedRollupGeneration == nil
@@ -1102,8 +1103,7 @@ final class UsageService {
             codexSeenTokenIds: codex.newSeenIds,
             pi: pi.newState,
             piSeenEntryIds: pi.newSeenIds,
-            opencodeLastMessageTime: opencode.newLastMessageTime,
-            opencodeSeenMessageIds: opencode.newSeenMessageIds,
+            opencode: opencode.newState,
             // 未落盘的一轮不推进 DSH watermark：下一轮重扫同样的帧，试算结果被丢弃，天然幂等。
             dsh: shouldWriteRollups && canCommitDsh ? dsh.newState : prev.dsh
         )
@@ -1212,7 +1212,10 @@ final class UsageService {
         cachedScanState = newScanState
         lastScanAt = Date()
         let unverifiedDshCount = dshContributions.values.filter { $0.needsVerification == true }.count
-        if failedFileCount > 0 {
+        if let error = opencode.error {
+            lastError = error
+            AppLog.warn(.usage, Redact.message(error))
+        } else if failedFileCount > 0 {
             lastError = "usage scan incomplete: \(failedFileCount) log source(s) unreadable or conflicting; retrying next scan"
         } else if unverifiedDshCount > 0 {
             lastError = "DSH historical usage for \(unverifiedDshCount) deleted session(s) could not be verified"
@@ -1226,10 +1229,76 @@ final class UsageService {
             usage scan claude files=\(claude.filesScanned) lines=\(claude.linesParsed) new=\(claude.entries.count); \
             codex files=\(codex.filesScanned) lines=\(codex.linesParsed) new=\(codex.entries.count); \
             pi files=\(pi.filesScanned) lines=\(pi.linesParsed) new=\(pi.entries.count); \
-            opencode messages=\(opencode.messagesRead) new=\(opencode.entries.count); \
+            opencode messages=\(opencode.messagesRead) sessions=\(opencode.refreshedSessionIDs.count) entries=\(opencode.entries.count); \
             dsh files=\(dsh.filesScanned) new=\(dsh.entries.count) unreadable=\(dsh.failedFileCount) directories=\(dsh.failedDirectoryCount) duplicateIDs=\(dsh.duplicateSessionCount); \
             unreadable=\(failedFileCount); elapsed=\(elapsed)
             """)
+        return true
+    }
+
+    /// 刷新会话的完整贡献替换旧贡献，再从对话桶归并 OpenCode 日桶。
+    /// 使用现有两个聚合器；不存在于源库的历史会话保留，其他服务分区不变。
+    @discardableResult
+    static func applyOpenCodeScan(
+        _ scan: OpencodeScanner.Result,
+        aggregator: UsageAggregator,
+        conversations: ConversationAggregator
+    ) -> Bool {
+        guard scan.isComplete, !scan.refreshedSessionIDs.isEmpty else { return false }
+        let refreshedKeys = Set(scan.refreshedSessionIDs.map { "opencode:\($0)" })
+        let old = conversations.snapshot()
+        let refreshed = ConversationAggregator()
+        refreshed.ingest(entries: scan.entries, seeds: scan.conversationSeeds)
+        let replacement = refreshed.snapshot()
+        let infos = old.infos.filter {
+            $0.app == .opencode && !refreshedKeys.contains($0.key)
+        } + replacement.infos
+        let buckets = old.buckets.filter {
+            $0.app == .opencode && !refreshedKeys.contains($0.conversationKey)
+        } + replacement.buckets
+
+        // 签名改变但用量未变（如流式正文更新）时，不推进 UI revision 或重写 rollup。
+        func bucketOrder(_ lhs: ConversationUsageBucket, _ rhs: ConversationUsageBucket) -> Bool {
+            if lhs.conversationKey != rhs.conversationKey { return lhs.conversationKey < rhs.conversationKey }
+            if lhs.day != rhs.day { return lhs.day < rhs.day }
+            if lhs.model != rhs.model { return lhs.model < rhs.model }
+            return lhs.speed.rawValue < rhs.speed.rawValue
+        }
+        let sameInfos = old.infos.filter { $0.app == .opencode }.sorted { $0.key < $1.key }
+            == infos.sorted { $0.key < $1.key }
+        let sameBuckets = old.buckets.filter { $0.app == .opencode }.sorted(by: bucketOrder)
+            == buckets.sorted(by: bucketOrder)
+        guard !sameInfos || !sameBuckets else { return false }
+
+        struct DayKey: Hashable {
+            var day: Date
+            var model: String
+            var speed: UsageSpeed
+        }
+        var dayBuckets: [DayKey: UsageBucket] = [:]
+        for bucket in buckets {
+            let key = DayKey(day: bucket.day, model: bucket.model, speed: bucket.speed)
+            if var dayBucket = dayBuckets[key] {
+                dayBucket.inputTokens += bucket.inputTokens
+                dayBucket.outputTokens += bucket.outputTokens
+                dayBucket.cacheReadTokens += bucket.cacheReadTokens
+                dayBucket.cacheCreationTokens += bucket.cacheCreationTokens
+                dayBucket.costUSD += bucket.costUSD
+                dayBucket.requestCount += bucket.requestCount
+                dayBucket.hasUnpricedUsage = dayBucket.hasUnpricedUsage || bucket.hasUnpricedUsage
+                dayBuckets[key] = dayBucket
+            } else {
+                dayBuckets[key] = UsageBucket(
+                    app: .opencode, model: bucket.model, speed: bucket.speed, day: bucket.day,
+                    inputTokens: bucket.inputTokens, outputTokens: bucket.outputTokens,
+                    cacheReadTokens: bucket.cacheReadTokens, cacheCreationTokens: bucket.cacheCreationTokens,
+                    costUSD: bucket.costUSD, requestCount: bucket.requestCount,
+                    hasUnpricedUsage: bucket.hasUnpricedUsage
+                )
+            }
+        }
+        aggregator.replaceLocal(app: .opencode, buckets: Array(dayBuckets.values))
+        conversations.replaceLocal(app: .opencode, infos: infos, buckets: buckets)
         return true
     }
 
