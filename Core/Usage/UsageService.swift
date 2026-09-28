@@ -1,6 +1,97 @@
 import Foundation
 import Observation
 
+/// 本地扫描器使用的日志根目录与标题索引。
+///
+/// 生产走家目录下的真实路径；测试注入临时目录与空索引，避免任何一次扫描碰到用户真实日志。
+nonisolated struct UsageScanRoots: Sendable {
+    var claudeRoot: URL
+    var claudeConversationIndex: @Sendable () -> ConversationTitleIndex.ClaudeIndex
+    var codexRoots: [URL]
+    var codexTitles: @Sendable () -> [String: String]
+    var piRoot: URL
+    var opencodeDatabaseURL: URL
+    var dshRoot: URL
+
+    static var production: UsageScanRoots {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return UsageScanRoots(
+            claudeRoot: ClaudeJSONLScanner.defaultRoot(),
+            claudeConversationIndex: { ConversationTitleIndex.claudeIndex() },
+            codexRoots: [
+                home.appendingPathComponent(".codex/sessions", isDirectory: true),
+                home.appendingPathComponent(".codex/archived_sessions", isDirectory: true),
+            ],
+            codexTitles: { ConversationTitleIndex.codexTitles() },
+            piRoot: home.appendingPathComponent(".pi/agent/sessions", isDirectory: true),
+            opencodeDatabaseURL: OpencodeScanner.defaultDatabaseURL(),
+            dshRoot: DshSessionScanner.defaultRoot
+        )
+    }
+}
+
+/// 本次启动的历史来源，供诊断与 UI 区分「正常」「回退上一份」「迁移旧文件」「首装」。
+nonisolated enum UsageHistoryLoadSource: Sendable, Equatable {
+    case current
+    /// 回退到上一份完整提交。`committedAt` 是它能保证的最新时点：
+    /// 该时点之后被删除的日志无法从备份补回，必须如实展示这个边界。
+    case previous(reason: String, committedAt: Date)
+    case migratedLegacy
+    case firstInstall
+    /// current 是更新版本格式：只读展示，禁止写入。
+    case unsupportedCurrent(String)
+    /// 已有历史无法加载，保留全部文件并禁止采集、迁移和覆盖。
+    case unavailable(String)
+
+    var isRestored: Bool {
+        switch self {
+        case .previous, .migratedLegacy: return true
+        case .current, .firstInstall, .unsupportedCurrent, .unavailable: return false
+        }
+    }
+}
+
+/// UI 需要的恢复状态摘要。服务只给结构化状态，文案在展示层拼装（`tr`）。
+nonisolated struct UsageHistoryRecoveryNotice: Sendable, Equatable {
+    /// 回退到的提交时点；与本次启动的 current 无关，nil 表示没有发生回退。
+    var restoredFromPreviousAt: Date?
+    /// 历史可用但无法安全续扫：核对通过后才能恢复采集。
+    var isRestricted: Bool
+    /// 快照由更新版本写入：只读展示，重算也无法写入。
+    var isReadOnly: Bool
+
+    var isDshFrozen: Bool = false
+    var isUnavailable: Bool = false
+    var verificationRejected: Bool = false
+
+    /// 允许重试核对，不承诺日志变化或缺失时能恢复。
+    var canRetryVerification: Bool { isRestricted && !isReadOnly }
+}
+
+nonisolated struct UsageHistoryLoad: Sendable {
+    var snapshot: UsageSnapshot?
+    var source: UsageHistoryLoadSource
+    var degradeReasons: [UsageSnapshotDegradeReason] = []
+    var writeDisabled = false
+    var diagnostic: String?
+}
+
+/// 一次候选重算的完整结果。
+private struct RebuildCandidate {
+    var dayBuckets: [UsageBucket]
+    var conversationInfos: [ConversationInfo]
+    var conversationBuckets: [ConversationUsageBucket]
+    var cycleBuckets: [CycleUsageBucket]
+    var cycleInitialRebuildCompletedAt: Date?
+    var cycleInitialRebuildCompletedApps: Set<UsageApp>
+    var dshContributions: [String: DshContribution]
+    var dshRequiresRebuild: Bool
+    var scanState: ScanState
+    /// 非 nil 表示来源不完整，候选不可提交。
+    var incompleteSources: String?
+    var mismatch: UsageRebuildMismatch
+}
+
 /// 协调 JSONL 扫描 → 聚合 → 持久化 → 通知 AppState 的入口。
 @MainActor
 @Observable
@@ -15,6 +106,40 @@ final class UsageService {
     private(set) var lastError: String?
     /// 进行中的全量重算 / 周期重建进度；空闲时为 nil。设置页"重新计算"期间展示。
     private(set) var scanProgress: ScanProgress?
+
+    /// 历史恢复状态。受限时不再自动全量重扫，历史照常展示。
+    private(set) var historyRecoveryState: UsageHistoryRecoveryState = .complete
+    /// 本次启动的历史来源与可恢复边界（含回退时点）。
+    private(set) var historyLoadSource: UsageHistoryLoadSource = .firstInstall
+    /// 加载时记录的降级原因（透明报告，不阻塞展示）。
+    private(set) var historyDegradeReasons: [UsageSnapshotDegradeReason] = []
+    /// 最近一次手动重算 / 受限核对的结构化结果。
+    private(set) var lastRebuildOutcome: UsageRebuildOutcome?
+    /// 最近一次重算被拒的脱敏摘要（键数量级），供 UI 与诊断说明拒绝原因。
+    private(set) var lastRebuildDiagnostic: String?
+    /// 主历史含 DSH 分区但逐会话贡献不可用：冻结该分区，既不增量也不重建。
+    private(set) var isDshHistoryFrozen = false
+
+    private let historyStore: UsageSnapshotStore
+    private let roots: UsageScanRoots
+    private let legacyLocations: LegacyUsageHistoryLocations
+    /// 个人历史补录文件位置；nil 走生产路径。测试注入不存在的路径，保证不读用户真实数据。
+    private let backfillURL: URL?
+    /// Cursor 远端缓存目录；nil 走生产路径。测试注入临时目录。
+    private let cursorCacheDirectory: URL?
+
+    /// 上一份成功提交的快照。写入失败时用它把内存回滚到与磁盘一致的状态。
+    private var committedSnapshot: UsageSnapshot?
+    /// 存储不可写（current 是更新版本格式）时只读运行。
+    private var storeWriteDisabled = false
+    /// 受限恢复的一次核对是否已在本进程尝试过，避免每轮都发起昂贵全量扫描。
+    private var restrictedVerificationAttempted = false
+
+    #if DEBUG
+    /// 在真实扫描完成、提交之前控制交错；只用于隔离测试。
+    var candidateReadyForTesting: (() async -> Void)?
+    var cycleReadyForTesting: (() async -> Void)?
+    #endif
 
     private weak var appState: AppState?
     private var scanQueued = false
@@ -36,6 +161,20 @@ final class UsageService {
     private(set) var isRefreshingCursorRemoteUsage = false
     private(set) var cursorRemoteUsageError: String?
 
+    init(
+        historyStore: UsageSnapshotStore = .production,
+        roots: UsageScanRoots = .production,
+        legacyLocations: LegacyUsageHistoryLocations = .production,
+        backfillURL: URL? = nil,
+        cursorCacheDirectory: URL? = nil
+    ) {
+        self.historyStore = historyStore
+        self.roots = roots
+        self.legacyLocations = legacyLocations
+        self.backfillURL = backfillURL
+        self.cursorCacheDirectory = cursorCacheDirectory
+    }
+
     /// 统计页读取的完整 Cursor 自然日覆盖范围。只有身份匹配的独立远端缓存会进入此集合。
     var cursorUsageCoveredDayRanges: [CursorUsageDayRange] {
         cursorUsageCache.coveredDayRanges
@@ -44,6 +183,31 @@ final class UsageService {
     /// 诊断用：DSH 逐会话贡献缓存里的会话数（不含会话路径、标题与正文）。
     var dshTrackedSessionCount: Int {
         dshContributions.count
+    }
+
+    /// 展示层的恢复摘要；正常启动时为 nil。
+    var historyRecoveryNotice: UsageHistoryRecoveryNotice? {
+        var restoredAt: Date?
+        if case .previous(_, let committedAt) = historyLoadSource {
+            restoredAt = committedAt
+        }
+        let readOnly = storeWriteDisabled
+        if readOnly, let snapshot = committedSnapshot { restoredAt = snapshot.committedAt }
+        let restricted = historyRecoveryState != .complete
+        guard restoredAt != nil || restricted || readOnly || isDshHistoryFrozen else { return nil }
+        return UsageHistoryRecoveryNotice(
+            restoredFromPreviousAt: restoredAt,
+            isRestricted: restricted,
+            isReadOnly: readOnly,
+            isDshFrozen: isDshHistoryFrozen,
+            isUnavailable: historyRecoveryState == .unavailable,
+            verificationRejected: historyRecoveryState == .verificationRejected
+        )
+    }
+
+    /// 测试缝：仍待复核的 DSH 会话 ID 集合（不含路径、标题与正文）。
+    func dshUnverifiedSessionIDsForTesting() -> Set<String> {
+        Set(dshContributions.filter { $0.value.needsVerification == true }.keys)
     }
 
     func isCursorRemoteUsageCovered(_ range: Range<Date>) -> Bool {
@@ -59,19 +223,17 @@ final class UsageService {
         }
     }
     /// rollup 写盘节流：距上次成功落盘不足这个间隔时，本轮只更新内存聚合，
-    /// 不重写磁盘快照。三份 rollup 都是全量快照（本机实测 conversation-rollup 3.4MB、
-    /// scan-state 2.6MB），活跃编码时按 5 分钟扫描周期写等于每小时数十 MB。
+    /// 不重写磁盘快照。整份快照是本机实测数 MB 级（conversation 3.4MB + scan-state 2.6MB
+    /// 量级），活跃编码时按 5 分钟扫描周期写等于每小时数十 MB。
     /// 代价只是 App 意外退出后下次启动多重扫这段窗口内的增量日志（秒级），不丢数据：
-    /// 未落盘期间 watermark 一并压住，盘上永远是「rollup 与 scan-state 同代同进度」。
+    /// 未落盘期间 watermark 一并压住，盘上永远是「汇总与进度同代同进度」。
     nonisolated private static let rollupWriteInterval: TimeInterval = 15 * 60
     /// 已进入内存聚合但尚未落盘的用量变化。
     private var hasUnwrittenRollupChanges = false
     private var lastRollupWriteAt: Date?
 
-    /// 上一轮成功提交的 ScanState 常驻内存，避免每轮扫描都从磁盘重读重解码
-    /// scan-state.json（随文件数和 seen ID 增长，本地实测已近 1MB）。
-    /// 冷启动首轮才从磁盘恢复；持久化失败时清空内存副本，
-    /// 由 requiresFullRebuild 强制下轮全量重建。
+    /// 上一轮成功提交的 ScanState 常驻内存，避免每轮扫描都从磁盘重读重解码。
+    /// 冷启动首轮才从快照恢复；快照没有可信进度时为 nil，此时不允许续扫。
     private var cachedScanState: ScanState?
 
     /// DSH 逐会话贡献缓存（常驻内存副本）。它是 DSH 日 / 对话分区的唯一来源：
@@ -80,91 +242,195 @@ final class UsageService {
     /// 贡献缓存缺失、版本不符或代次不一致：下一轮 DSH 必须从零全量重扫（§3.3）。
     private var dshNeedsFullRescan = true
 
+    // MARK: - 启动
+
     func bootstrap(appState: AppState) async {
         self.appState = appState
-        // 日聚合与对话两份主 rollup 必须同代；周期 rollup 也只在同代时恢复。
-        // rollup 可能较大（conversation-rollup 实测可达数 MB），三个 load 都是磁盘读取 +
-        // JSON 解码，统一放到后台线程，避免启动时阻塞主线程、菜单栏图标卡顿。
-        let (payload, conversationPayload, cyclePayload, cursorPayload) = await Task.detached(priority: .utility) {
-            (
-                UsageRollupCache.load(),
-                ConversationRollupCache.load(),
-                CycleUsageRollupCache.load(),
-                CursorUsageCache.load()
-            )
+        let store = historyStore
+        let legacyLocations = self.legacyLocations
+        let load = await Task.detached(priority: .utility) {
+            Self.loadInitialHistory(store: store, legacyLocations: legacyLocations)
+        }.value
+
+        storeWriteDisabled = load.writeDisabled
+        historyLoadSource = load.source
+        historyDegradeReasons = load.degradeReasons
+        if let diagnostic = load.diagnostic {
+            AppLog.warn(.usage, "usage history load: \(diagnostic)")
+        }
+        if let snapshot = load.snapshot {
+            apply(snapshot: snapshot)
+            // 迁移结果要先成为新的真源，下一次启动不再回读旧文件。
+            if load.source == .migratedLegacy, !storeWriteDisabled {
+                if let error = await persistExistingSnapshot(snapshot) {
+                    lastError = "usage history migration could not be saved: \(error)"
+                    hasUnwrittenRollupChanges = true
+                    lastRollupWriteAt = nil
+                    AppLog.error(.usage, "usage history migration commit failed: \(Redact.message(error))")
+                }
+            }
+        } else {
+            requiresFullRebuild = true
+        }
+        switch load.source {
+        case .previous(let reason, _):
+            AppLog.warn(.usage, "usage history restored from previous snapshot reason=\(Redact.message(reason))")
+        case .migratedLegacy:
+            AppLog.info(.usage, "usage history migrated from legacy caches")
+        case .unavailable(let reason):
+            historyRecoveryState = .unavailable
+            lastError = "usage history unavailable; local collection paused: \(reason)"
+        case .unsupportedCurrent:
+            lastError = "usage history format unsupported; running read-only"
+            AppLog.error(.usage, "usage history current snapshot version unsupported; read-only")
+        case .current, .firstInstall:
+            break
+        }
+
+        let cursorCacheDirectory = self.cursorCacheDirectory
+        let cursorPayload = await Task.detached(priority: .utility) {
+            CursorUsageCache.load(in: cursorCacheDirectory)
         }.value
         cursorUsageCache = cursorPayload
-        let generationsMatch = !payload.generationID.isEmpty
-            && payload.generationID == conversationPayload.generationID
-        if generationsMatch {
-            aggregator.load(from: payload.buckets)
-            conversationAggregator.load(infos: conversationPayload.infos, buckets: conversationPayload.buckets)
-            loadedRollupGeneration = payload.generationID
-            let validCycleIDs = Set(appState.quotaCycles.records.map(\.id))
-            if cyclePayload.generationID == payload.generationID {
-                // 周期记录每次载入都会被 `cleaningUpLegacyPayload` 剔除残片 / 合并重叠，
-                // rollup 里因此常残留指向已消失 cycleID 的孤儿桶。旧实现把这看作整份
-                // rollup 失效，清空聚合器并触发一次不带窗口的全历史重建（实测 2.4GB、
-                // 约 100 秒 CPU），而实际只有孤儿桶是脏的：其余桶与初始重建标记都仍
-                // 有效。这里只丢弃孤儿桶，落在重建窗口内的那部分交给受限重建补回，
-                // 窗口之外的置位提示、等用户手动重算，不再自动全量重扫。
-                let orphanedCycleIDs = Set(cyclePayload.buckets.map(\.cycleID))
-                    .subtracting(validCycleIDs)
-                cycleAggregator.load(from: cyclePayload.buckets.filter {
-                    validCycleIDs.contains($0.cycleID)
-                })
-                loadedCycleGeneration = cyclePayload.generationID
-                cycleInitialRebuildCompletedAt = cyclePayload.initialRebuildCompletedAt
-                cycleInitialRebuildCompletedApps = cyclePayload.effectiveInitialRebuildCompletedApps
-                classifyOrphanedCycleBuckets(orphanedCycleIDs)
-            } else {
-                // 代次不一致说明周期 rollup 与主 rollup 不是同一次扫描的产物，
-                // 无从判断哪些桶可信，只能整份丢弃、由初始重建重灌。
-                cycleAggregator.load(from: [])
-                loadedCycleGeneration = nil
-                cycleInitialRebuildCompletedAt = nil
-                cycleInitialRebuildCompletedApps = []
-            }
-            lastScanAt = max(payload.updatedAt, conversationPayload.updatedAt)
-        } else {
-            aggregator.load(from: [])
-            conversationAggregator.load(infos: [], buckets: [])
-            cycleAggregator.load(from: [])
-            requiresFullRebuild = true
-            loadedRollupGeneration = nil
-            loadedCycleGeneration = nil
-            cycleInitialRebuildCompletedAt = nil
-            cycleInitialRebuildCompletedApps = []
-            lastScanAt = nil
-        }
-        // DSH 逐会话贡献缓存：必须与两个主 rollup 同代，否则不能和旧桶混用，
-        // 下一轮用空状态全量重扫 DSH 日志重建（§3.3）。
-        if let generation = loadedRollupGeneration {
-            let contributionResult = await Task.detached(priority: .utility) {
-                DshContributionCache.load(generationID: generation)
-            }.value
-            switch contributionResult {
-            case .valid(let contributions):
-                dshContributions = contributions
-                dshNeedsFullRescan = false
-            case .pending(let contributions):
-                dshContributions = contributions
-                dshNeedsFullRescan = true
-            case .rebuild:
-                dshContributions = [:]
-                dshNeedsFullRescan = true
-            }
-        } else {
-            dshContributions = [:]
-            dshNeedsFullRescan = true
-        }
+
         // 个人历史用量一次性补录：见 ImportedUsageBackfill 注释。这里先合并一次保证扫描前即可展示；
         // runScan 每轮还会按同样规则重新合并，兜底缓存失效清空聚合器的情况。文件不存在时是纯 no-op。
-        let existingClaudeDays = Set(aggregator.snapshotLocal().filter { $0.app == .claude }.map(\.day))
-        aggregator.ingestLocal(ImportedUsageBackfill.loadMissingEntries(app: .claude, existingDays: existingClaudeDays))
+        mergeImportedBackfill()
+        if historyRecoveryState != .complete, !storeWriteDisabled {
+            lastError = Self.restrictedHistoryMessage
+        }
         publishTotals()
         // 远端价格目录后台刷新：非阻塞，isDue 内部判断是否真的需要发请求，刷新结果由下次扫描自然拾取。
         PricingCatalogStore.shared.refreshIfNeeded()
+    }
+
+    /// 只有从未建立新存储且没有新快照证据时，才允许旧格式迁移。
+    private nonisolated static func loadInitialHistory(
+        store: UsageSnapshotStore,
+        legacyLocations: LegacyUsageHistoryLocations
+    ) -> UsageHistoryLoad {
+        let current = store.loadCurrent()
+        if case .valid(let snapshot) = current {
+            return UsageHistoryLoad(snapshot: snapshot, source: .current)
+        }
+        let previous = store.loadPrevious()
+        if let reason = current.invalidReason, reason.isUnsupported {
+            return UsageHistoryLoad(
+                snapshot: previous.snapshot,
+                source: .unsupportedCurrent(reason.description),
+                writeDisabled: true,
+                diagnostic: reason.description
+            )
+        }
+        if case .valid(let snapshot) = previous {
+            let reason = current.invalidReason?.description ?? "current missing"
+            // 只有已确认备份可用才隔离 current；全部不可用时原文件留在原处。
+            if current.invalidReason != nil { store.quarantineCurrent() }
+            return UsageHistoryLoad(
+                snapshot: snapshot,
+                source: .previous(reason: reason, committedAt: snapshot.committedAt),
+                diagnostic: "previous restored: \(reason)"
+            )
+        }
+        if let reason = previous.invalidReason, reason.isUnsupported {
+            return UsageHistoryLoad(
+                snapshot: nil, source: .unsupportedCurrent(reason.description),
+                writeDisabled: true, diagnostic: reason.description
+            )
+        }
+        if store.hasHistoryEvidence {
+            let reason = "no usable snapshot; current=\(current.invalidReason?.description ?? "missing"), previous=\(previous.invalidReason?.description ?? "missing")"
+            return UsageHistoryLoad(
+                snapshot: nil, source: .unavailable(reason),
+                writeDisabled: true, diagnostic: reason
+            )
+        }
+        return fallBackToLegacy(legacyLocations: legacyLocations, diagnostic: nil)
+    }
+
+    private nonisolated static func fallBackToLegacy(
+        legacyLocations: LegacyUsageHistoryLocations,
+        diagnostic: String?
+    ) -> UsageHistoryLoad {
+        switch LegacyUsageHistoryImport.makeSnapshot(locations: legacyLocations) {
+        case .firstInstall:
+            return UsageHistoryLoad(
+                snapshot: nil,
+                source: .firstInstall,
+                diagnostic: diagnostic
+            )
+        case .imported(let snapshot):
+            return UsageHistoryLoad(
+                snapshot: snapshot,
+                source: .migratedLegacy,
+                degradeReasons: snapshot.degradeReasons,
+                diagnostic: diagnostic
+            )
+        case .unusable(let reason, let detail):
+            return UsageHistoryLoad(
+                snapshot: nil,
+                source: .unavailable(detail),
+                degradeReasons: [reason],
+                writeDisabled: true,
+                diagnostic: diagnostic.map { "\($0); legacy \(detail)" } ?? "legacy \(detail)"
+            )
+        }
+    }
+
+    /// 把一份快照装进内存聚合器。只做状态装载，不写盘。
+    private func apply(snapshot: UsageSnapshot) {
+        historyDegradeReasons = snapshot.degradeReasons
+        aggregator.load(from: snapshot.usageRollup.buckets)
+        conversationAggregator.load(
+            infos: snapshot.conversationRollup.infos,
+            buckets: snapshot.conversationRollup.buckets
+        )
+        let validCycleIDs = Set(appState?.quotaCycles.records.map(\.id) ?? [])
+        let orphanedCycleIDs = Set(snapshot.cycleRollup.buckets.map(\.cycleID))
+            .subtracting(validCycleIDs)
+        cycleAggregator.load(from: snapshot.cycleRollup.buckets.filter {
+            validCycleIDs.contains($0.cycleID)
+        })
+        classifyOrphanedCycleBuckets(orphanedCycleIDs)
+
+        loadedRollupGeneration = snapshot.snapshotID
+        loadedCycleGeneration = snapshot.cycleRollup.generationID.isEmpty
+            ? nil
+            : snapshot.cycleRollup.generationID
+        cycleInitialRebuildCompletedAt = snapshot.cycleRollup.initialRebuildCompletedAt
+        cycleInitialRebuildCompletedApps = snapshot.cycleRollup.effectiveInitialRebuildCompletedApps
+        cachedScanState = snapshot.hasScanProgress ? snapshot.scanState : nil
+        // 没有可信进度时不能续扫：这条路径不允许被当成「空状态全量重建」。
+        requiresFullRebuild = !snapshot.hasScanProgress
+        if snapshot.hasScanProgress {
+            historyRecoveryState = .complete
+        } else {
+            historyRecoveryState = .pendingVerification
+        }
+        restrictedVerificationAttempted = false
+        isDshHistoryFrozen = snapshot.dshHistoryFrozen
+        dshContributions = snapshot.dshHistoryFrozen ? [:] : snapshot.dshContributions.contributions
+        dshNeedsFullRescan = snapshot.dshHistoryFrozen
+            || snapshot.dshContributions.generationID.isEmpty
+            || snapshot.dshContributions.requiresRebuild == true
+        hasUnwrittenRollupChanges = false
+        lastRollupWriteAt = snapshot.committedAt
+        lastScanAt = max(snapshot.usageRollup.updatedAt, snapshot.conversationRollup.updatedAt)
+        committedSnapshot = snapshot
+    }
+
+    nonisolated private static let restrictedHistoryMessage =
+        "usage history preserved without verified scan progress; automatic rescan paused"
+
+    private func mergeImportedBackfill() {
+        let existingClaudeDays = Set(aggregator.snapshotLocal().filter { $0.app == .claude }.map(\.day))
+        aggregator.ingestLocal(
+            ImportedUsageBackfill.loadMissingEntries(
+                app: .claude,
+                existingDays: existingClaudeDays,
+                from: backfillURL
+            )
+        )
     }
 
     /// 仅在 Cursor 身份确认后恢复与该身份绑定的远端快照。缓存身份不匹配时，
@@ -341,6 +607,20 @@ final class UsageService {
         return nil
     }
 
+    /// 测试缝：走与生产完全相同的远端日桶落盘路径，但目录已注入临时路径。
+    func storeCursorRemoteUsageForTesting(
+        buckets: [UsageBucket],
+        dayRange: Range<Date>,
+        accountID: String
+    ) async {
+        await storeCursorRemoteUsage(
+            CursorUsageFetchResult(buckets: buckets, dayRange: dayRange),
+            accountID: accountID,
+            updatedAt: Date()
+        )
+    }
+
+    /// 远端日桶落盘路径；测试注入临时目录时不会写用户真实缓存。
     private func storeCursorRemoteUsage(
         _ fetched: CursorUsageFetchResult,
         accountID: String,
@@ -358,9 +638,10 @@ final class UsageService {
         publishTotals()
 
         let cacheSnapshot = cursorUsageCache
+        let cursorCacheDirectory = self.cursorCacheDirectory
         do {
             try await Task.detached(priority: .utility) {
-                try CursorUsageCache.save(cacheSnapshot)
+                try CursorUsageCache.save(cacheSnapshot, in: cursorCacheDirectory)
             }.value
         } catch {
             // 远端内存快照仍可展示；下一轮成功刷新会再次尝试原子写缓存。
@@ -412,6 +693,8 @@ final class UsageService {
         return chunks
     }
 
+    // MARK: - 常规扫描
+
     /// Scheduler 的周期扫描入口：日志目录自上次扫描以来没有变化时整轮跳过。
     /// 手动刷新（`refreshNow`）与强制重算（`forceRescan`）直接走 `scanNow` / 全量路径，
     /// 不受门控影响，用户点了就一定扫。
@@ -432,11 +715,16 @@ final class UsageService {
         isScanning = true
         defer { isScanning = false }
 
+        if storeWriteDisabled { return }
         repeat {
             scanQueued = false
             // 借用量扫描的既有节奏当远端价格目录 24h 到期检查的心跳，不新开定时器；非阻塞。
             PricingCatalogStore.shared.refreshIfNeeded()
             PricingCatalogStore.shared.commitPending()
+            if historyRecoveryState != .complete {
+                await handleRestrictedRecovery()
+                continue
+            }
             let cacheResult = await resolveScanState()
             if case .invalidated = cacheResult {
                 clearUsageAggregatesForFullRebuild()
@@ -445,6 +733,26 @@ final class UsageService {
                 requiresFullRebuild = false
             }
         } while scanQueued
+    }
+
+    /// 受限恢复：历史可用但进度不可信。
+    /// 本进程只做一次完整核对；不通过就保留历史并停止自动重扫，避免每轮发起昂贵全量扫描。
+    private func handleRestrictedRecovery() async {
+        guard restrictedVerificationAttempted == false else { return }
+        restrictedVerificationAttempted = true
+        let outcome = await runCandidateRebuild(purpose: .restrictedRecovery)
+        switch outcome {
+        case .replaced:
+            historyRecoveryState = .complete
+            historyDegradeReasons = []
+            lastRebuildOutcome = .recoveredFromRestrictedHistory
+            AppLog.info(.usage, "usage history restored: scanned candidate matches preserved history")
+        default:
+            historyRecoveryState = .verificationRejected
+            lastRebuildOutcome = .restrictedRecoveryRejected
+            lastError = Self.restrictedHistoryMessage
+            AppLog.warn(.usage, "usage history recovery verification rejected; history preserved")
+        }
     }
 
     /// 受限重建的日志回溯窗口。5h / weekly 周期滚动涉及的条目必然落在最近一个周期内，
@@ -516,20 +824,17 @@ final class UsageService {
             cycles: cycles,
             affectedCycleIDs: affectedCycleIDs
         )
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let codexRoots = [
-            home.appendingPathComponent(".codex/sessions", isDirectory: true),
-            home.appendingPathComponent(".codex/archived_sessions", isDirectory: true),
-        ]
         let progress: ScanProgressCallback? = { [weak self] progress in
             DispatchQueue.main.async { self?.scanProgress = progress }
         }
 
+        let claudeRoot = roots.claudeRoot
+        let codexRoots = roots.codexRoots
         async let claudeTask = Task.detached(priority: .utility) {
             ClaudeJSONLScanner.scan(
                 previous: [:],
                 seenMessageIds: [],
-                root: ClaudeJSONLScanner.defaultRoot(),
+                root: claudeRoot,
                 // 重建只需要 entries，跳过标题索引构建（省一次索引文件解析）
                 conversationIndex: ConversationTitleIndex.ClaudeIndex(titles: [:], projects: [:]),
                 minimumMtime: dateFrom,
@@ -654,6 +959,7 @@ final class UsageService {
     /// 受限重建前用主扫描状态做一次常规增量提交，保证窗口重扫后
     /// watermark 不会再返回同一批条目。失效状态沿用常规扫描的全量重建语义。
     private func drainPendingUsageBeforeCycleRebuild() async -> Bool {
+        guard !storeWriteDisabled, historyRecoveryState == .complete else { return false }
         let cacheResult = await resolveScanState()
         if case .invalidated = cacheResult {
             clearUsageAggregatesForFullRebuild()
@@ -677,6 +983,7 @@ final class UsageService {
         loadedCycleGeneration = nil
         cycleInitialRebuildCompletedAt = nil
         cycleInitialRebuildCompletedApps = []
+        committedSnapshot = nil
         publishTotals()
     }
 
@@ -687,7 +994,7 @@ final class UsageService {
         dshNeedsFullRescan = true
     }
 
-    /// 周期用量重建的公共收尾：聚合 → 落盘 rollup → 更新内存状态。
+    /// 周期用量重建的公共收尾：聚合 → 落盘快照 → 更新内存状态。
     /// - Parameter initialRebuildApps: 本轮执行初始重建的 Provider；成功侧会独立置位，
     ///   失败侧保持待重试，不会让已完成 Provider 在下次启动重复全量扫描。
     /// - Parameter rebuildRange: 非 nil 表示受限重建，只重算这些周期内的桶。
@@ -699,6 +1006,16 @@ final class UsageService {
         failedApps: Set<UsageApp> = [],
         rebuildRange affectedCycleIDs: Set<String>? = nil
     ) async {
+        guard !storeWriteDisabled, historyRecoveryState == .complete,
+              let scanState = cachedScanState,
+              let generationID = loadedRollupGeneration,
+              scanState.generationID == generationID else {
+            lastError = "cycle usage rebuild deferred: no verified scan progress"
+            return
+        }
+        #if DEBUG
+        await cycleReadyForTesting?()
+        #endif
         let failedProviderNames = [UsageApp.codex, .claude]
             .filter { failedApps.contains($0) }
             .map { $0 == .codex ? "Codex" : "Claude Code" }
@@ -736,41 +1053,52 @@ final class UsageService {
         let completedInitialRebuild = !initialRebuildApps.isEmpty
             && !requiredApps.isEmpty
             && completedApps.isSuperset(of: requiredApps)
-        let generationID = loadedRollupGeneration ?? UUID().uuidString
         let fingerprint = Pricing.fingerprint(knownUsage: pricingUsageKeys(from: aggregator.snapshotLocal()))
-        let rollup = CycleUsageRollupPayload(
-            generationID: generationID,
-            pricingFingerprint: fingerprint,
-            buckets: cycleAggregator.snapshot(),
-            initialRebuildCompletedAt: completedInitialRebuild ? completedAt : cycleInitialRebuildCompletedAt,
-            initialRebuildCompletedApps: completedApps,
-            updatedAt: completedAt
+        let conversation = conversationAggregator.snapshot()
+        let error = await persistSnapshot(
+            snapshotID: generationID,
+            fingerprint: fingerprint,
+            hasScanProgress: true,
+            integrity: .complete,
+            degradeReasons: [],
+            dshHistoryFrozen: isDshHistoryFrozen,
+            scanState: scanState,
+            buckets: aggregator.snapshotLocal(),
+            conversationInfos: conversation.infos,
+            conversationBuckets: conversation.buckets,
+            cycleBuckets: cycleAggregator.snapshot(),
+            cycleInitialRebuildCompletedAt: completedInitialRebuild ? completedAt : cycleInitialRebuildCompletedAt,
+            cycleInitialRebuildCompletedApps: completedApps,
+            dshContributions: dshContributions,
+            dshRequiresRebuild: dshNeedsFullRescan
         )
-        do {
-            try await Task.detached(priority: .utility) {
-                try CycleUsageRollupCache.save(rollup)
-            }.value
-            loadedCycleGeneration = generationID
-            cycleInitialRebuildCompletedApps = completedApps
-            if completedInitialRebuild {
-                cycleInitialRebuildCompletedAt = completedAt
-            }
-            lastError = Self.lastErrorAfterCycleRebuild(
-                current: lastError,
-                rebuildWarning: rebuildWarning
-            )
-            let elapsed = String(format: "%.2fs", Date().timeIntervalSince(started))
-            let tag = initialRebuildApps.isEmpty ? "range rebuild" : "initial rebuild"
-            let status = failedApps.isEmpty ? "completed" : "partially completed"
-            AppLog.info(.usage, "cycle usage \(tag) \(status) elapsed=\(elapsed)")
-        } catch {
+        if let error {
+            // 内存（含周期桶与完成标记）回滚到上一份提交，避免「周期领先于主历史」。
+            rollbackToCommittedSnapshot()
             lastError = "cycle usage rebuild failed: \(error)"
-            AppLog.error(.usage, "cycle usage rebuild failed: \(Redact.error(error))")
+            AppLog.error(.usage, "cycle usage rebuild failed: \(Redact.message(error))")
+            return
         }
+        hasUnwrittenRollupChanges = false
+        lastRollupWriteAt = Date()
+        loadedCycleGeneration = generationID
+        cycleInitialRebuildCompletedApps = completedApps
+        if completedInitialRebuild {
+            cycleInitialRebuildCompletedAt = completedAt
+        }
+        lastError = Self.lastErrorAfterCycleRebuild(
+            current: lastError,
+            rebuildWarning: rebuildWarning
+        )
+        let elapsed = String(format: "%.2fs", Date().timeIntervalSince(started))
+        let tag = initialRebuildApps.isEmpty ? "range rebuild" : "initial rebuild"
+        let status = failedApps.isEmpty ? "completed" : "partially completed"
+        AppLog.info(.usage, "cycle usage \(tag) \(status) elapsed=\(elapsed)")
     }
 
     func rebuildCycleUsageIfNeeded() async {
         guard let appState, !appState.quotaCycles.records.isEmpty else { return }
+        guard !storeWriteDisabled, historyRecoveryState == .complete else { return }
         guard !Self.pendingInitialCycleRebuildApps(
             cycles: appState.quotaCycles.records,
             completedApps: cycleInitialRebuildCompletedApps
@@ -793,6 +1121,7 @@ final class UsageService {
                 Task { await scanNow() }
             }
         }
+        guard await drainPendingUsageBeforeCycleRebuild() else { return }
         let progress: ScanProgressCallback? = { [weak self] progress in
             DispatchQueue.main.async { self?.scanProgress = progress }
         }
@@ -802,18 +1131,30 @@ final class UsageService {
             completedApps: cycleInitialRebuildCompletedApps
         )
         guard !pendingApps.isEmpty else { return }
+        let claudeRoot = roots.claudeRoot
+        let claudeIndex = roots.claudeConversationIndex()
+        let codexRoots = roots.codexRoots
+        let codexTitles = roots.codexTitles()
         let claudeTask: Task<ClaudeJSONLScanner.Result, Never>? = pendingApps.contains(.claude)
             ? Task.detached(priority: .utility) {
                 ClaudeJSONLScanner.scan(
                     previous: [:],
                     seenMessageIds: [],
+                    root: claudeRoot,
+                    conversationIndex: claudeIndex,
                     onProgress: progress
                 )
             }
             : nil
         let codexTask: Task<CodexJSONLScanner.Result, Never>? = pendingApps.contains(.codex)
             ? Task.detached(priority: .utility) {
-                await CodexJSONLScanner.scan(previous: [:], seenTokenIds: [], onProgress: progress)
+                await CodexJSONLScanner.scan(
+                    previous: [:],
+                    seenTokenIds: [],
+                    roots: codexRoots,
+                    indexedTitles: codexTitles,
+                    onProgress: progress
+                )
             }
             : nil
         let claude = await claudeTask?.value
@@ -841,32 +1182,23 @@ final class UsageService {
         )
     }
 
-    /// 决定本轮扫描的起点状态。优先用内存里上一轮已提交的 ScanState；
-    /// 内存路径与磁盘路径执行同样的结构校验——generationID 须与已加载 rollup 同代。
+    /// 决定本轮扫描的起点状态。进度随快照一起加载，与已加载汇总同代；
     /// 价格指纹不参与失效判定：价格目录更新后自动扫描按现价计新条目，
     /// 历史桶保持旧价，等用户在设置页「重新计算用量」手动全量重扫对齐。
-    /// 只有冷启动且日聚合、对话两份主 rollup 恢复成功时，
-    /// 首轮需要读盘取得与它们同代的 ScanState。
     private func resolveScanState() async -> ScanCacheLoadResult {
         if requiresFullRebuild { return .invalidated }
-        if let cached = cachedScanState {
-            if cached.generationID == loadedRollupGeneration {
-                return .valid(cached)
-            }
+        guard let cached = cachedScanState,
+              cached.generationID == loadedRollupGeneration
+        else {
             return .invalidated
         }
-        let loaded = await Task.detached(priority: .utility) {
-            ScanCache.load()
-        }.value
-        if case .valid(let state) = loaded, state.generationID == loadedRollupGeneration {
-            return loaded
-        }
-        return .invalidated
+        return .valid(cached)
     }
 
-    /// 用户在设置页手动触发的强制重算：无视已有 watermark 和 fingerprint，
-    /// 清空内存聚合并把本地全部日志按当前已提交的价格目录重新解析、重新计费。
-    /// 用于「定价表改错后修复，想立刻重算」这类场景，不必等下次价格表变动或重启 App。
+    // MARK: - 安全重算
+
+    /// 用户在设置页手动触发的强制重算。候选在独立的聚合器上生成，
+    /// 通过完整用量向量对账并成功持久化后才替换当前结果；失败一律保留原历史。
     func forceRescan() async {
         // 撞上另一次进行中的扫描(常见于 App 冷启动自动扫描、或 Scheduler 定时扫描)时,
         // 不再静默丢弃这次操作:等它跑完再真正强制重算,保证用户点的这次一定生效。
@@ -878,45 +1210,348 @@ final class UsageService {
         defer {
             isScanning = false
             scanProgress = nil
+            if scanQueued { Task { await scanNow() } }
         }
+        lastRebuildOutcome = nil
         PricingCatalogStore.shared.refreshIfNeeded()
         // 手动重算同样是一次完整扫描：先提交已经刷好的 pending，避免用户刚点击重算
         // 却仍按旧 active 价格扫描；本次刚发起的网络刷新则留给下一次扫描。
         PricingCatalogStore.shared.commitPending()
-        cachedScanState = nil
-        aggregator.load(from: [])
-        conversationAggregator.load(infos: [], buckets: [])
-        cycleAggregator.load(from: [])
-        // 手动重算同样要从零重建 DSH：只清桶不清贡献会把重扫结果当成新增再加一遍。
-        resetDshContributions()
-        loadedRollupGeneration = nil
-        loadedCycleGeneration = nil
-        cycleInitialRebuildCompletedAt = nil
-        cycleInitialRebuildCompletedApps = []
-        publishTotals()
-        requiresFullRebuild = true
-        if await runScan(prev: ScanState(), reportProgress: true) {
-            requiresFullRebuild = false
-            // 全量重扫已按现有周期记录重灌全部桶，窗口外的缺口就此补齐。
-            cycleUsageNeedsManualRecalculation = false
-            hasPendingOrphanCycleRebuild = false
-            if await refreshMissingPricingIfNeeded() {
-                // 强制重算没有 scanNow 的 repeat 循环；缺价刷新拿到新价格后就在这里
-                // 立即再做一次全量扫描，避免必须等待下一次定时扫描。
-                cachedScanState = nil
-                aggregator.load(from: [])
-                conversationAggregator.load(infos: [], buckets: [])
-                cycleAggregator.load(from: [])
-                resetDshContributions()
-                loadedRollupGeneration = nil
-                loadedCycleGeneration = nil
-                publishTotals()
-                requiresFullRebuild = true
-                if await runScan(prev: ScanState(), reportProgress: true) {
-                    requiresFullRebuild = false
-                }
+        guard !storeWriteDisabled else {
+            lastRebuildOutcome = .commitFailed("usage history store is read-only")
+            return
+        }
+
+        if historyRecoveryState != .complete {
+            let outcome = await runCandidateRebuild(purpose: .restrictedRecovery)
+            switch outcome {
+            case .replaced:
+                historyRecoveryState = .complete
+                historyDegradeReasons = []
+                lastRebuildOutcome = .recoveredFromRestrictedHistory
+            default:
+                historyRecoveryState = .verificationRejected
+                lastRebuildOutcome = .restrictedRecoveryRejected
+                lastError = Self.restrictedHistoryMessage
+            }
+            return
+        }
+
+        // 基准必须与磁盘一致：先把上一次常规扫描之后积压的增量提交掉。
+        guard await drainPendingIncrements() else {
+            lastRebuildOutcome = .commitFailed(lastError ?? "pending changes could not be committed")
+            return
+        }
+
+        let first = await runCandidateRebuild(purpose: .manualRecalculation)
+        var outcome = first
+        if case .replaced = first, await refreshMissingPricingIfNeeded() {
+            // 缺价刷新拿到新价格后必须再走一遍完整候选与对账；第二轮失败时保留第一轮有效结果。
+            switch await runCandidateRebuild(purpose: .pricingRefresh) {
+            case .replaced(let cycleVerified):
+                outcome = .replaced(cycleVerified: cycleVerified)
+            case .rejectedUsageChanged, .rejectedIncompleteSources:
+                outcome = .partiallyCommitted("pricing refresh round rejected; first round kept")
+            case .commitFailed(let detail):
+                // 第一轮已提交且有效；第二轮失败不能伪装成整轮成功。
+                outcome = .partiallyCommitted("pricing refresh round failed: \(detail); first round kept")
+            case .recoveredFromRestrictedHistory, .restrictedRecoveryRejected, .partiallyCommitted:
+                outcome = first
             }
         }
+        lastRebuildOutcome = outcome
+        switch outcome {
+        case .replaced(let cycleVerified):
+            cycleUsageNeedsManualRecalculation = !cycleVerified
+            if cycleVerified { hasPendingOrphanCycleRebuild = false }
+        case .rejectedUsageChanged, .rejectedIncompleteSources, .commitFailed, .partiallyCommitted:
+            break
+        case .recoveredFromRestrictedHistory, .restrictedRecoveryRejected:
+            break
+        }
+    }
+
+    /// 测试缝：把内存里待落盘的增量立刻提交。语义等价于写盘节流窗口到期后的那一轮常规扫描。
+    func flushPendingRollupChangesForTesting() async {
+        _ = await drainPendingIncrements()
+    }
+
+    /// 提交尚未落盘的增量，得到可对账的基准。失败时保证内存与磁盘仍然一致。
+    private func drainPendingIncrements() async -> Bool {
+        let cacheResult = await resolveScanState()
+        if case .invalidated = cacheResult {
+            clearUsageAggregatesForFullRebuild()
+        }
+        guard await runScan(prev: cacheResult.state) else { return false }
+        requiresFullRebuild = false
+        return true
+    }
+
+    private enum RebuildPurpose {
+        case manualRecalculation
+        case pricingRefresh
+        case restrictedRecovery
+    }
+
+    /// 候选隔离重算：完整扫描 → 独立聚合 → 完整性门槛 → 对账 → 提交 → 发布。
+    private func runCandidateRebuild(purpose: RebuildPurpose) async -> UsageRebuildOutcome {
+        guard !storeWriteDisabled else {
+            return .commitFailed("usage history store is read-only")
+        }
+        let candidate = await buildRebuildCandidate()
+        #if DEBUG
+        await candidateReadyForTesting?()
+        #endif
+        if let incomplete = candidate.incompleteSources {
+            lastRebuildDiagnostic = "sources=(\(incomplete))"
+            AppLog.warn(.usage, "usage rebuild rejected sources=\(incomplete)")
+            return .rejectedIncompleteSources(incomplete)
+        }
+        if candidate.mismatch.hasUsageDifference {
+            lastRebuildDiagnostic = candidate.mismatch.summary
+            AppLog.warn(.usage, "usage rebuild rejected mismatch=\(candidate.mismatch.summary)")
+            return .rejectedUsageChanged
+        }
+        let cycleVerified = !candidate.mismatch.hasCycleDifference
+        lastRebuildDiagnostic = cycleVerified ? nil : candidate.mismatch.summary
+        let error = await persistSnapshot(
+            snapshotID: candidate.scanState.generationID,
+            fingerprint: candidate.scanState.pricingFingerprint,
+            hasScanProgress: true,
+            integrity: .complete,
+            degradeReasons: [],
+            dshHistoryFrozen: isDshHistoryFrozen,
+            scanState: candidate.scanState,
+            buckets: candidate.dayBuckets,
+            conversationInfos: candidate.conversationInfos,
+            conversationBuckets: candidate.conversationBuckets,
+            cycleBuckets: candidate.cycleBuckets,
+            cycleInitialRebuildCompletedAt: candidate.cycleInitialRebuildCompletedAt,
+            cycleInitialRebuildCompletedApps: candidate.cycleInitialRebuildCompletedApps,
+            dshContributions: candidate.dshContributions,
+            dshRequiresRebuild: candidate.dshRequiresRebuild
+        )
+        if let error {
+            lastRebuildDiagnostic = "commit=\(error)"
+            AppLog.error(.usage, "usage rebuild commit failed: \(Redact.message(error))")
+            return .commitFailed(error)
+        }
+        // 提交成功后才切换内存与 UI。
+        aggregator.load(from: candidate.dayBuckets)
+        conversationAggregator.load(
+            infos: candidate.conversationInfos,
+            buckets: candidate.conversationBuckets
+        )
+        cycleAggregator.load(from: candidate.cycleBuckets)
+        dshContributions = candidate.dshContributions
+        dshNeedsFullRescan = candidate.dshRequiresRebuild
+        cachedScanState = candidate.scanState
+        loadedRollupGeneration = candidate.scanState.generationID
+        loadedCycleGeneration = candidate.scanState.generationID
+        cycleInitialRebuildCompletedAt = candidate.cycleInitialRebuildCompletedAt
+        cycleInitialRebuildCompletedApps = candidate.cycleInitialRebuildCompletedApps
+        hasUnwrittenRollupChanges = false
+        lastRollupWriteAt = Date()
+        requiresFullRebuild = false
+        lastScanAt = Date()
+        let unverified = dshContributions.values.filter { $0.needsVerification == true }.count
+        if isDshHistoryFrozen {
+            lastError = "DSH usage history preserved; per-session contributions unavailable so new DSH usage is not collected"
+        } else if unverified > 0 {
+            lastError = "DSH historical usage for \(unverified) deleted session(s) could not be verified"
+        } else {
+            lastError = nil
+        }
+        publishTotals()
+        let tag: String
+        switch purpose {
+        case .manualRecalculation: tag = "manual"
+        case .pricingRefresh: tag = "pricing refresh"
+        case .restrictedRecovery: tag = "restricted recovery"
+        }
+        AppLog.info(.usage, "usage rebuild \(tag) committed cycle_verified=\(cycleVerified)")
+        return .replaced(cycleVerified: cycleVerified)
+    }
+
+    /// 用独立聚合器构造完整候选。读取期间当前结果继续展示；这里不修改任何线上状态。
+    private func buildRebuildCandidate() async -> RebuildCandidate {
+        let progress: ScanProgressCallback? = { [weak self] progress in
+            DispatchQueue.main.async { self?.scanProgress = progress }
+        }
+        let claudeRoot = roots.claudeRoot
+        let claudeIndex = roots.claudeConversationIndex()
+        let codexRoots = roots.codexRoots
+        let codexTitles = roots.codexTitles()
+        let piRoot = roots.piRoot
+        let opencodeDatabaseURL = roots.opencodeDatabaseURL
+        let dshRoot = roots.dshRoot
+        let dshFrozen = isDshHistoryFrozen
+        let preservedDshState = cachedScanState?.dsh ?? [:]
+
+        async let claudeTask = Task.detached(priority: .utility) {
+            ClaudeJSONLScanner.scan(
+                previous: [:],
+                seenMessageIds: [],
+                root: claudeRoot,
+                conversationIndex: claudeIndex,
+                onProgress: progress
+            )
+        }.value
+        async let codexTask = Task.detached(priority: .utility) {
+            await CodexJSONLScanner.scan(
+                previous: [:],
+                seenTokenIds: [],
+                roots: codexRoots,
+                indexedTitles: codexTitles,
+                onProgress: progress
+            )
+        }.value
+        async let piTask = Task.detached(priority: .utility) {
+            PiJSONLScanner.scan(
+                previous: [:],
+                seenEntryIds: [],
+                root: piRoot,
+                onProgress: progress
+            )
+        }.value
+        async let opencodeTask = Task.detached(priority: .utility) {
+            OpencodeScanner.scan(
+                previous: nil,
+                databaseURL: opencodeDatabaseURL,
+                onProgress: progress
+            )
+        }.value
+        async let dshTask = Task.detached(priority: .utility) {
+            dshFrozen
+                ? DshSessionScanner.frozenResult(preserving: preservedDshState)
+                : DshSessionScanner.scan(previous: [:], root: dshRoot, onProgress: progress)
+        }.value
+
+        let claude = await claudeTask
+        let codex = await codexTask
+        let pi = await piTask
+        let opencode = await opencodeTask
+        let dsh = await dshTask
+
+        var incomplete: [String] = []
+        if claude.failedFileCount > 0 { incomplete.append("Claude Code") }
+        if codex.failedFileCount > 0 { incomplete.append("Codex") }
+        // OpenCode 库从未存在（本机没装）是正常状态；只有库在却读不开才算来源不完整。
+        let opencodeProblem = opencode.error != nil || !opencode.isComplete
+        if opencodeProblem, FileManager.default.fileExists(atPath: opencodeDatabaseURL.path) {
+            incomplete.append("OpenCode")
+        }
+        if !dshFrozen, !dsh.isComplete { incomplete.append("DSH") }
+
+        // 需要保留的历史分区（源库中已删除会话、DSH 历史贡献）先按基准装载，
+        // 再由完整扫描结果覆盖；不能用空聚合器直接覆盖历史。
+        let baselineDay = aggregator.snapshotLocal()
+        let baselineConversation = conversationAggregator.snapshot()
+        let baselineCycles = cycleAggregator.snapshot()
+        let candidateDaily = UsageAggregator()
+        let candidateConversations = ConversationAggregator()
+        candidateDaily.load(from: baselineDay.filter { $0.app == .opencode || $0.app == .dsh })
+        candidateConversations.load(
+            infos: baselineConversation.infos.filter { $0.app == .opencode || $0.app == .dsh },
+            buckets: baselineConversation.buckets.filter { $0.app == .opencode || $0.app == .dsh }
+        )
+
+        candidateDaily.ingestLocal(claude.entries)
+        candidateDaily.ingestLocal(codex.entries)
+        candidateDaily.ingestLocal(pi.entries)
+        _ = Self.applyOpenCodeScan(
+            opencode,
+            aggregator: candidateDaily,
+            conversations: candidateConversations
+        )
+        _ = candidateConversations.ingest(
+            entries: claude.entries + codex.entries + pi.entries,
+            seeds: claude.conversationSeeds + codex.conversationSeeds + pi.conversationSeeds
+        )
+        let existingClaudeDays = Set(
+            candidateDaily.snapshotLocal().filter { $0.app == .claude }.map(\.day)
+        )
+        candidateDaily.ingestLocal(
+            ImportedUsageBackfill.loadMissingEntries(
+                app: .claude,
+                existingDays: existingClaudeDays,
+                from: backfillURL
+            )
+        )
+
+        let cycleEntries = claude.entries + codex.entries
+        let freshDshContributions = dshFrozen
+            ? dshContributions
+            : DshContributionStore.apply(scan: dsh, to: dshContributions).contributions
+        let dshRollup = DshContributionRollup.reduce(freshDshContributions)
+        if !dshFrozen {
+            candidateDaily.replaceLocal(app: .dsh, buckets: dshRollup.dayBuckets)
+            candidateConversations.replaceLocal(
+                app: .dsh,
+                infos: dshRollup.conversationInfos,
+                buckets: dshRollup.conversationBuckets
+            )
+        }
+
+        let cycles = appState?.quotaCycles.records ?? []
+        let accountSegments = appState?.quotaCycles.accountSegments ?? []
+        let candidateCycles = CycleUsageAggregator()
+        if !cycles.isEmpty {
+            candidateCycles.rebuild(
+                exactEntries: cycleEntries,
+                cycles: cycles,
+                accountSegments: accountSegments
+            )
+        }
+
+        let candidateDay = candidateDaily.snapshotLocal()
+        let conversationSnapshot = candidateConversations.snapshot()
+        var mismatch = UsageHistoryConsistency.compareUsage(
+            baseline: baselineDay,
+            candidateDay: candidateDay,
+            baselineConversation: baselineConversation.buckets,
+            candidateConversation: conversationSnapshot.buckets,
+            baselineInfos: baselineConversation.infos,
+            candidateInfos: conversationSnapshot.infos
+        )
+        UsageHistoryConsistency.compareCycle(
+            baseline: baselineCycles,
+            candidate: candidateCycles.snapshot(),
+            into: &mismatch
+        )
+
+        let fingerprint = Pricing.fingerprint(
+            knownUsage: Set(candidateDay.map { PricingUsageKey(app: $0.app, model: $0.model, speed: $0.speed) })
+        )
+        let scanState = ScanState(
+            generationID: UUID().uuidString,
+            pricingFingerprint: fingerprint,
+            claude: claude.newState,
+            codex: codex.newState,
+            claudeSeenMessageIds: claude.newSeenIds,
+            codexSeenTokenIds: codex.newSeenIds,
+            pi: pi.newState,
+            piSeenEntryIds: pi.newSeenIds,
+            opencode: opencode.newState,
+            dsh: dshFrozen ? preservedDshState : dsh.newState
+        )
+        let requiredApps = Set(cycles.map(\.app)).intersection([.codex, .claude])
+        let completedApps = incomplete.isEmpty
+            ? cycleInitialRebuildCompletedApps.union(requiredApps)
+            : cycleInitialRebuildCompletedApps
+        return RebuildCandidate(
+            dayBuckets: candidateDay,
+            conversationInfos: conversationSnapshot.infos,
+            conversationBuckets: conversationSnapshot.buckets,
+            cycleBuckets: candidateCycles.snapshot(),
+            cycleInitialRebuildCompletedAt: incomplete.isEmpty ? Date() : cycleInitialRebuildCompletedAt,
+            cycleInitialRebuildCompletedApps: completedApps,
+            dshContributions: freshDshContributions,
+            dshRequiresRebuild: dshFrozen ? true : !dsh.isComplete,
+            scanState: scanState,
+            incompleteSources: incomplete.isEmpty ? nil : incomplete.joined(separator: ", "),
+            mismatch: mismatch
+        )
     }
 
     /// 设置页手动更新在线价格目录：绕过 24 小时拉取最新目录，新价格在下一轮扫描的
@@ -929,6 +1564,8 @@ final class UsageService {
         defer { isRefreshingPricingCatalog = false }
         return await PricingCatalogStore.shared.forceRefresh()
     }
+
+    // MARK: - 常规扫描实现
 
     /// - Parameter allowDeferredWrite: 允许把本轮聚合结果留在内存里、等到节流窗口到期
     ///   再统一落盘。只有常规周期扫描（`scanNow`）传 true；强制重算与周期重建前的
@@ -951,10 +1588,21 @@ final class UsageService {
         } else {
             progress = nil
         }
+        let claudeRoot = roots.claudeRoot
+        let claudeIndex = roots.claudeConversationIndex()
+        let codexRoots = roots.codexRoots
+        let codexTitles = roots.codexTitles()
+        let piRoot = roots.piRoot
+        let opencodeDatabaseURL = roots.opencodeDatabaseURL
+        let dshRoot = roots.dshRoot
+        let dshFrozen = isDshHistoryFrozen
+
         async let claudeTask = Task.detached(priority: .utility) {
             ClaudeJSONLScanner.scan(
                 previous: prev.claude,
                 seenMessageIds: prevSeen,
+                root: claudeRoot,
+                conversationIndex: claudeIndex,
                 onProgress: progress
             )
         }.value
@@ -962,6 +1610,8 @@ final class UsageService {
             await CodexJSONLScanner.scan(
                 previous: prev.codex,
                 seenTokenIds: prev.codexSeenTokenIds,
+                roots: codexRoots,
+                indexedTitles: codexTitles,
                 onProgress: progress
             )
         }.value
@@ -969,19 +1619,23 @@ final class UsageService {
             PiJSONLScanner.scan(
                 previous: prev.pi,
                 seenEntryIds: prev.piSeenEntryIds,
+                root: piRoot,
                 onProgress: progress
             )
         }.value
         async let opencodeTask = Task.detached(priority: .utility) {
             OpencodeScanner.scan(
                 previous: prev.opencode,
+                databaseURL: opencodeDatabaseURL,
                 onProgress: progress
             )
         }.value
         // 贡献缓存不可用时 DSH 必须从零全量重扫：只靠 watermark 增量拿不回历史贡献。
         let dshPrevious = dshNeedsFullRescan ? [:] : prev.dsh
         async let dshTask = Task.detached(priority: .utility) {
-            DshSessionScanner.scan(previous: dshPrevious, onProgress: progress)
+            dshFrozen
+                ? DshSessionScanner.frozenResult(preserving: prev.dsh)
+                : DshSessionScanner.scan(previous: dshPrevious, root: dshRoot, onProgress: progress)
         }.value
 
         let claude = await claudeTask
@@ -1008,8 +1662,7 @@ final class UsageService {
         // 个人历史用量一次性补录：缓存失效路径会清空聚合器，若只在 bootstrap 合并，
         // 清空后落盘的 rollup 将丢失补录数据。每轮扫描都按天去重重新合并，
         // 保证任何一次落盘的快照都包含补录用量。
-        let existingClaudeDays = Set(aggregator.snapshotLocal().filter { $0.app == .claude }.map(\.day))
-        aggregator.ingestLocal(ImportedUsageBackfill.loadMissingEntries(app: .claude, existingDays: existingClaudeDays))
+        mergeImportedBackfill()
 
         let cycles = appState?.quotaCycles.records ?? []
         let cycleChanged: Bool
@@ -1057,13 +1710,13 @@ final class UsageService {
         // DSH 不像其他扫描器那样靠 seen 集合兜底去重：本轮若不落盘，watermark 会一并压住，
         // 下一轮会把同样的帧再扫一遍。因此先纯内存试算贡献，只有本轮真的落盘才把它计入聚合，
         // 让「未落盘就重扫」天然幂等。
-        let dshRebuildReady = dshNeedsFullRescan && dsh.isComplete
-        let canCommitDsh = !dshNeedsFullRescan || dsh.isComplete
+        let dshRebuildReady = !dshFrozen && dshNeedsFullRescan && dsh.isComplete
+        let canCommitDsh = !dshFrozen && (!dshNeedsFullRescan || dsh.isComplete)
         let dshUpdate = canCommitDsh
             ? DshContributionStore.apply(scan: dsh, to: dshContributions)
             : DshContributionStore.Update(contributions: dshContributions, changed: false)
 
-        // 没有真实用量或档案变化时沿用现有代次，只提交轻量 watermark。
+        // 没有用量或档案变化时仍统一保存完整快照，watermark 也受写盘节流约束。
         let hasNewEntries = !claude.entries.isEmpty || !codex.entries.isEmpty
             || !pi.entries.isEmpty || opencodeChanged || dshUpdate.changed || dshRebuildReady
         if hasNewEntries || conversationChanged { hasUnwrittenRollupChanges = true }
@@ -1074,7 +1727,6 @@ final class UsageService {
         } ?? true
         let shouldWriteRollups = mustWriteRollups || dshRebuildReady
             || (hasUnwrittenRollupChanges && (!allowDeferredWrite || throttleElapsed))
-        let generationID = shouldWriteRollups ? UUID().uuidString : loadedRollupGeneration!
 
         if shouldWriteRollups {
             // 贡献有变化就整体重归并并替换 DSH 分区：日桶、对话桶与档案只换 DSH 那一份，
@@ -1094,6 +1746,32 @@ final class UsageService {
 
         let buckets = aggregator.snapshotLocal()
         let fingerprint = Pricing.fingerprint(knownUsage: pricingUsageKeys(from: buckets))
+        let dshStateForScan = shouldWriteRollups && canCommitDsh ? dsh.newState : prev.dsh
+        // watermark 绝不能单独越过尚未落盘的聚合数据：进度落后一轮只是多扫一次，
+        // 进度领先则会在重启后拿到「新 watermark + 旧汇总」，中间那段用量永久丢失。
+        let probeGenerationID = loadedRollupGeneration ?? ""
+        let probeScanState = ScanState(
+            generationID: probeGenerationID,
+            pricingFingerprint: fingerprint,
+            claude: claude.newState,
+            codex: codex.newState,
+            claudeSeenMessageIds: claude.newSeenIds,
+            codexSeenTokenIds: codex.newSeenIds,
+            pi: pi.newState,
+            piSeenEntryIds: pi.newSeenIds,
+            opencode: opencode.newState,
+            dsh: dshStateForScan
+        )
+        let cycleNeedsWrite = cycleChanged || loadedCycleGeneration == nil
+        // 任何一次落盘都是「汇总 + 进度 + 周期 + DSH」的整份提交：不能只写其中一份。
+        // watermark-only 变化也遵守整份快照节流；与磁盘进度比较，防止下一轮无变化时遗忘待提交进度。
+        let progressNeedsWrite = probeScanState != committedSnapshot?.scanState
+        let shouldCommitSnapshot = shouldWriteRollups
+            || (!hasUnwrittenRollupChanges && (progressNeedsWrite || cycleNeedsWrite)
+                && (!allowDeferredWrite || throttleElapsed))
+        let generationID = shouldCommitSnapshot
+            ? UUID().uuidString
+            : (loadedRollupGeneration ?? UUID().uuidString)
         let newScanState = ScanState(
             generationID: generationID,
             pricingFingerprint: fingerprint,
@@ -1104,111 +1782,41 @@ final class UsageService {
             pi: pi.newState,
             piSeenEntryIds: pi.newSeenIds,
             opencode: opencode.newState,
-            // 未落盘的一轮不推进 DSH watermark：下一轮重扫同样的帧，试算结果被丢弃，天然幂等。
-            dsh: shouldWriteRollups && canCommitDsh ? dsh.newState : prev.dsh
+            dsh: dshStateForScan
         )
-        // watermark 绝不能单独越过尚未落盘的聚合数据：那样重启后会拿到
-        // 「新 watermark + 旧 rollup」的同代组合，中间那段用量永久丢失。
-        // 因此只有本轮真的写 rollup、或压根没有待落盘数据时，才允许提交 watermark。
-        let commitsThisRound = shouldWriteRollups || !hasUnwrittenRollupChanges
-        let shouldWriteScanState = commitsThisRound && newScanState != prev
 
-        let rollup: UsageRollupPayload?
-        let conversationRollup: ConversationRollupPayload?
-        let cycleRollup: CycleUsageRollupPayload?
-        if shouldWriteRollups {
-            let updatedAt = Date()
-            let conversationSnapshot = conversationAggregator.snapshot()
-            rollup = UsageRollupPayload(
-                generationID: generationID,
-                pricingFingerprint: fingerprint,
+        if shouldCommitSnapshot {
+            let conversation = conversationAggregator.snapshot()
+            let error = await persistSnapshot(
+                snapshotID: generationID,
+                fingerprint: fingerprint,
+                hasScanProgress: true,
+                integrity: .complete,
+                degradeReasons: [],
+                dshHistoryFrozen: dshFrozen,
+                scanState: newScanState,
                 buckets: buckets,
-                updatedAt: updatedAt
+                conversationInfos: conversation.infos,
+                conversationBuckets: conversation.buckets,
+                cycleBuckets: cycleAggregator.snapshot(),
+                cycleInitialRebuildCompletedAt: cycleInitialRebuildCompletedAt,
+                cycleInitialRebuildCompletedApps: cycleInitialRebuildCompletedApps,
+                dshContributions: dshContributions,
+                dshRequiresRebuild: dshNeedsFullRescan
             )
-            conversationRollup = ConversationRollupPayload(
-                generationID: generationID,
-                pricingFingerprint: fingerprint,
-                infos: conversationSnapshot.infos,
-                buckets: conversationSnapshot.buckets,
-                updatedAt: updatedAt
-            )
-            cycleRollup = CycleUsageRollupPayload(
-                generationID: generationID,
-                pricingFingerprint: fingerprint,
-                buckets: cycleAggregator.snapshot(),
-                initialRebuildCompletedAt: cycleInitialRebuildCompletedAt,
-                initialRebuildCompletedApps: cycleInitialRebuildCompletedApps,
-                updatedAt: updatedAt
-            )
-        } else {
-            rollup = nil
-            conversationRollup = nil
-            // 周期桶同理：领先于 watermark 会在下轮增量扫描时被重复灌入。
-            if commitsThisRound, cycleChanged || loadedCycleGeneration == nil {
-                cycleRollup = CycleUsageRollupPayload(
-                    generationID: generationID,
-                    pricingFingerprint: fingerprint,
-                    buckets: cycleAggregator.snapshot(),
-                    initialRebuildCompletedAt: cycleInitialRebuildCompletedAt,
-                    initialRebuildCompletedApps: cycleInitialRebuildCompletedApps,
-                    updatedAt: Date()
-                )
-            } else {
-                cycleRollup = nil
+            if let error {
+                // 提交失败：内存回滚到上一份已提交快照，下一轮从同一 watermark 重扫，
+                // 不重复累计。磁盘上的 current 没有被替换过，仍是一份完整提交。
+                rollbackToCommittedSnapshot()
+                lastError = error
+                AppLog.error(.usage, "usage scan persistence failed: \(Redact.message(error))")
+                return false
             }
-        }
-
-        // DSH 贡献缓存与三份 rollup、scan-state 同代；顺序同样是「派生快照先写、watermark 最后写」。
-        let dshContributionsToWrite = shouldWriteRollups ? dshContributions : [:]
-        let dshRebuildPending = dshNeedsFullRescan
-
-        let persistenceError: String? = await Task.detached(priority: .utility) {
-            do {
-                if let rollup, let conversationRollup {
-                    // 聚合结果先落盘，watermark 最后提交；generationID 用于启动时识别中断写入。
-                    try UsageRollupCache.save(rollup)
-                    try ConversationRollupCache.save(conversationRollup)
-                    try DshContributionCache.save(
-                        dshContributionsToWrite,
-                        generationID: generationID,
-                        pricingFingerprint: fingerprint,
-                        requiresRebuild: dshRebuildPending
-                    )
-                }
-                if let cycleRollup {
-                    try CycleUsageRollupCache.save(cycleRollup)
-                }
-                if shouldWriteScanState {
-                    try ScanCache.save(newScanState)
-                }
-                return nil
-            } catch {
-                let saveError = error
-                do {
-                    try ScanCache.invalidate()
-                } catch {
-                    return "\(saveError); scan-state invalidate failed: \(error)"
-                }
-                return String(describing: saveError)
-            }
-        }.value
-
-        if let persistenceError {
-            requiresFullRebuild = true
-            cachedScanState = nil
-            lastError = persistenceError
-            AppLog.error(.usage, "usage scan persistence failed: \(Redact.message(persistenceError))")
-            return false
-        }
-
-        if shouldWriteRollups {
             hasUnwrittenRollupChanges = false
             lastRollupWriteAt = Date()
-        }
-        loadedRollupGeneration = generationID
-        if cycleRollup != nil {
             loadedCycleGeneration = generationID
         }
+        loadedRollupGeneration = generationID
         cachedScanState = newScanState
         lastScanAt = Date()
         let unverifiedDshCount = dshContributions.values.filter { $0.needsVerification == true }.count
@@ -1217,6 +1825,8 @@ final class UsageService {
             AppLog.warn(.usage, Redact.message(error))
         } else if failedFileCount > 0 {
             lastError = "usage scan incomplete: \(failedFileCount) log source(s) unreadable or conflicting; retrying next scan"
+        } else if dshFrozen {
+            lastError = "DSH usage history preserved; per-session contributions unavailable so new DSH usage is not collected"
         } else if unverifiedDshCount > 0 {
             lastError = "DSH historical usage for \(unverifiedDshCount) deleted session(s) could not be verified"
         } else {
@@ -1235,6 +1845,135 @@ final class UsageService {
             """)
         return true
     }
+
+    // MARK: - 提交与回滚
+
+    /// 构造并提交一份完整快照。成功返回 nil，失败返回脱敏错误描述。
+    private func persistSnapshot(
+        snapshotID: String,
+        fingerprint: String,
+        hasScanProgress: Bool,
+        integrity: UsageSnapshotIntegrity,
+        degradeReasons: [UsageSnapshotDegradeReason],
+        dshHistoryFrozen: Bool,
+        scanState: ScanState,
+        buckets: [UsageBucket],
+        conversationInfos: [ConversationInfo],
+        conversationBuckets: [ConversationUsageBucket],
+        cycleBuckets: [CycleUsageBucket],
+        cycleInitialRebuildCompletedAt: Date?,
+        cycleInitialRebuildCompletedApps: Set<UsageApp>,
+        dshContributions: [String: DshContribution],
+        dshRequiresRebuild: Bool
+    ) async -> String? {
+        guard !storeWriteDisabled else { return "usage history store is read-only" }
+        let now = Date()
+        var snapshot = UsageSnapshot()
+        snapshot.snapshotID = snapshotID
+        snapshot.createdAt = committedSnapshot?.createdAt ?? now
+        snapshot.committedAt = now
+        snapshot.integrity = integrity
+        snapshot.degradeReasons = degradeReasons
+        snapshot.hasScanProgress = hasScanProgress
+        snapshot.scanState = scanState
+        snapshot.usageRollup = UsageRollupPayload(
+            generationID: snapshotID,
+            pricingFingerprint: fingerprint,
+            buckets: buckets,
+            updatedAt: now
+        )
+        snapshot.conversationRollup = ConversationRollupPayload(
+            generationID: snapshotID,
+            pricingFingerprint: fingerprint,
+            infos: conversationInfos,
+            buckets: conversationBuckets,
+            updatedAt: now
+        )
+        snapshot.cycleRollup = CycleUsageRollupPayload(
+            generationID: snapshotID,
+            pricingFingerprint: fingerprint,
+            buckets: cycleBuckets,
+            initialRebuildCompletedAt: cycleInitialRebuildCompletedAt,
+            initialRebuildCompletedApps: cycleInitialRebuildCompletedApps,
+            updatedAt: now
+        )
+        snapshot.dshContributions = DshContributionPayload(
+            generationID: dshHistoryFrozen ? "" : snapshotID,
+            pricingFingerprint: fingerprint,
+            contributions: dshHistoryFrozen ? [:] : dshContributions,
+            requiresRebuild: dshHistoryFrozen ? nil : dshRequiresRebuild,
+            updatedAt: now
+        )
+        snapshot.dshHistoryFrozen = dshHistoryFrozen
+
+        let store = historyStore
+        let error: String? = await Task.detached(priority: .utility) {
+            do {
+                try store.commit(snapshot)
+                return nil
+            } catch {
+                if let saved = store.loadCurrent().snapshot,
+                   saved.snapshotID == snapshot.snapshotID,
+                   saved.committedAt == snapshot.committedAt {
+                    return nil
+                }
+                return String(describing: error)
+            }
+        }.value
+        if let error { return error }
+        committedSnapshot = snapshot
+        return nil
+    }
+
+    /// 直接把一份已经构造好的快照提交到存储（迁移导入用）。
+    private func persistExistingSnapshot(_ snapshot: UsageSnapshot) async -> String? {
+        let store = historyStore
+        let error: String? = await Task.detached(priority: .utility) {
+            do {
+                try store.commit(snapshot)
+                return nil
+            } catch {
+                if let saved = store.loadCurrent().snapshot,
+                   saved.snapshotID == snapshot.snapshotID,
+                   saved.committedAt == snapshot.committedAt {
+                    return nil
+                }
+                return String(describing: error)
+            }
+        }.value
+        if let error { return error }
+        committedSnapshot = snapshot
+        return nil
+    }
+
+    /// 回滚到上一份成功提交的完整快照。没有提交过（首装）时清空内存。
+    private func rollbackToCommittedSnapshot() {
+        guard let snapshot = committedSnapshot else {
+            clearUsageAggregatesForFullRebuild()
+            return
+        }
+        aggregator.load(from: snapshot.usageRollup.buckets)
+        conversationAggregator.load(
+            infos: snapshot.conversationRollup.infos,
+            buckets: snapshot.conversationRollup.buckets
+        )
+        cycleAggregator.load(from: snapshot.cycleRollup.buckets)
+        loadedRollupGeneration = snapshot.snapshotID
+        loadedCycleGeneration = snapshot.cycleRollup.generationID.isEmpty
+            ? nil
+            : snapshot.cycleRollup.generationID
+        cycleInitialRebuildCompletedAt = snapshot.cycleRollup.initialRebuildCompletedAt
+        cycleInitialRebuildCompletedApps = snapshot.cycleRollup.effectiveInitialRebuildCompletedApps
+        cachedScanState = snapshot.hasScanProgress ? snapshot.scanState : nil
+        dshContributions = snapshot.dshHistoryFrozen ? [:] : snapshot.dshContributions.contributions
+        dshNeedsFullRescan = snapshot.dshHistoryFrozen
+            || snapshot.dshContributions.generationID.isEmpty
+            || snapshot.dshContributions.requiresRebuild == true
+        hasUnwrittenRollupChanges = false
+        publishTotals()
+    }
+
+    // MARK: - 共用工具
 
     /// 刷新会话的完整贡献替换旧贡献，再从对话桶归并 OpenCode 日桶。
     /// 使用现有两个聚合器；不存在于源库的历史会话保留，其他服务分区不变。

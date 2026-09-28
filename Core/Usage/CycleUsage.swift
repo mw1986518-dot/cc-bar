@@ -206,8 +206,8 @@ enum CycleUsageRollupCache {
     nonisolated private static let fileName = "cycle-usage-rollup.json"
     nonisolated private static let bundleDirectory = "CCBar"
 
-    nonisolated static func load() -> CycleUsageRollupPayload {
-        let url = fileURL()
+    nonisolated static func load(in directory: URL? = nil) -> CycleUsageRollupPayload {
+        let url = fileURL(in: directory)
         guard let data = try? Data(contentsOf: url),
               let payload = decode(data)
         else {
@@ -224,15 +224,18 @@ enum CycleUsageRollupCache {
         return payload
     }
 
-    nonisolated static func save(_ payload: CycleUsageRollupPayload) throws {
-        let url = fileURL()
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    nonisolated static func save(_ payload: CycleUsageRollupPayload, in directory: URL? = nil) throws {
+        let url = fileURL(in: directory)
+        let fileDirectory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: fileDirectory, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(payload)
         try data.write(to: url, options: [.atomic])
     }
 
-    nonisolated static func fileURL() -> URL {
+    nonisolated static func fileURL(in directory: URL? = nil) -> URL {
+        if let directory {
+            return directory.appendingPathComponent(fileName, isDirectory: false)
+        }
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support", isDirectory: true)

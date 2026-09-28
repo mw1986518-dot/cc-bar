@@ -53,7 +53,7 @@ nonisolated final class PricingCatalogStore: @unchecked Sendable {
     private static let modelsDevURL = URL(string: "https://models.dev/api.json")!
 
     private init() {
-        state = OSAllocatedUnfairLock(initialState: CatalogState(active: PricingCatalogCache.load()))
+        state = OSAllocatedUnfairLock(initialState: CatalogState(active: AppRuntime.isRunningUnitTests ? PricingCatalogCachePayload() : PricingCatalogCache.load()))
     }
 
     /// 快速同步读取，零 I/O，不阻塞调用方。Standard 沿用 LiteLLM 优先；
@@ -103,6 +103,9 @@ nonisolated final class PricingCatalogStore: @unchecked Sendable {
     /// App 启动、以及每次用量扫描开始时调用。非阻塞：内部判断是否到期，真正到期才会
     /// 发起网络请求；已有刷新在跑则直接返回，不重复起任务。
     func refreshIfNeeded() {
+        #if DEBUG
+        if testOverridesStorage.withLock({ $0.networkDisabled }) { return }
+        #endif
         let now = Date()
         let due = state.withLock { catalog in
             let payload = catalog.pending ?? catalog.active
@@ -120,21 +123,49 @@ nonisolated final class PricingCatalogStore: @unchecked Sendable {
     }
 
     #if DEBUG
-    /// 单元测试隔离用：丢弃内存中的远端目录快照。测试进程宿主是 CCBar.app，会加载开发者机器
-    /// Application Support 下的真实磁盘缓存，使计价断言漂移；先清空内存态并删除磁盘缓存，
-    /// 保证断言只基于内置本地表（在线优先的模型在无缓存时回落到本地兜底价）。
+    /// 单元测试只重置内存价格，不读取或写入用户价格缓存。
     func resetCatalogForTesting() {
-        refreshRunning.withLock { $0 = false }
-        state.withLock {
-            $0 = CatalogState(active: PricingCatalogCachePayload(), pending: nil)
-        }
-        try? PricingCatalogCache.save(PricingCatalogCachePayload())
+        disableNetworkForTesting()
+        installCatalogForTesting(PricingCatalogCachePayload())
     }
+
+    /// 单元测试隔离：只改内存态，不碰用户磁盘缓存，也不发网络请求。
+    func installCatalogForTesting(_ payload: PricingCatalogCachePayload) {
+        state.withLock {
+            $0 = CatalogState(active: payload, pending: nil)
+        }
+    }
+
+    /// 单元测试隔离：关闭所有网络刷新，避免单测打真实价格源。
+    func disableNetworkForTesting() {
+        testOverridesStorage.withLock { $0.networkDisabled = true }
+    }
+
+    /// 单元测试隔离：`refreshForMissing` 的替身；nil 恢复真实逻辑。
+    func setMissingRefreshHandlerForTesting(
+        _ handler: (@Sendable (Set<PricingUsageKey>) async -> Bool)?
+    ) {
+        testOverridesStorage.withLock { $0.missingRefreshHandler = handler }
+    }
+
+    private struct TestOverrides: Sendable {
+        var networkDisabled = false
+        var missingRefreshHandler: (@Sendable (Set<PricingUsageKey>) async -> Bool)?
+    }
+
+    private var testOverridesStorage: OSAllocatedUnfairLock<TestOverrides> {
+        Self.overrides
+    }
+
+    private static let overrides = OSAllocatedUnfairLock(initialState: TestOverrides())
     #endif
 
     /// 用户手动更新：绕过 24 小时与失败退避。若常规刷新正在进行，等它完成后再强制刷新，
     /// 避免只复用「其中一个源到期」的常规结果而漏掉另一个源。
     func forceRefresh() async -> Bool {
+        #if DEBUG
+        if testOverridesStorage.withLock({ $0.networkDisabled }) { return false }
+        #endif
         while !beginRefresh() {
             await waitForRefreshCompletion()
         }
@@ -145,6 +176,12 @@ nonisolated final class PricingCatalogStore: @unchecked Sendable {
 
     /// 扫描发现缺价时触发。每个 app/model/speed 持久化 30 分钟冷却，避免上游尚未收录时反复下载。
     func refreshForMissing(_ keys: Set<PricingUsageKey>) async -> Bool {
+        #if DEBUG
+        if let handler = testOverridesStorage.withLock({ $0.missingRefreshHandler }) {
+            return await handler(keys)
+        }
+        if testOverridesStorage.withLock({ $0.networkDisabled }) { return false }
+        #endif
         let now = Date()
         let eligible = state.withLock { catalog -> Bool in
             var payload = catalog.pending ?? catalog.active

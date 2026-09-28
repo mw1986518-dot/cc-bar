@@ -51,6 +51,9 @@ private struct MenuBarLabelRoot: View {
                 }
             }
             .task {
+                // 单元测试宿主也会启动 App；此时绝不能触发真实 bootstrap，
+                // 它会读真实日志、写真实 rollup / 缓存。测试自己注入临时目录驱动 UsageService。
+                guard !AppRuntime.isRunningUnitTests else { return }
                 await appState.bootstrap()
                 FloatingPanelController.shared.attach(appState: appState)
                 FloatingPanelController.shared.sync()
@@ -61,6 +64,23 @@ private struct MenuBarLabelRoot: View {
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "onboarding")
             }
+    }
+}
+
+/// 运行环境判定。测试宿主同样是 CCBar.app，必须显式区分，否则单元测试会启动真实采集。
+nonisolated enum AppRuntime {
+    /// 测试宿主进程里必须为 true。判定取多重信号：不同 Xcode 版本注入的环境变量与
+    /// 加载进来的 xctest bundle 名称并不一致，任一命中即认定处于测试环境。
+    static var isRunningUnitTests: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        if environment["XCTestConfigurationFilePath"] != nil { return true }
+        if environment["XCTestBundlePath"] != nil { return true }
+        if environment["XCTestSessionIdentifier"] != nil { return true }
+        if environment["XCTestSessionIdentifierKey"] != nil { return true }
+        if NSClassFromString("XCTestCase") != nil { return true }
+        if Bundle.allBundles.contains(where: { $0.bundlePath.hasSuffix(".xctest") }) { return true }
+        if Bundle.allFrameworks.contains(where: { $0.bundlePath.contains("XCTest.framework") }) { return true }
+        return false
     }
 }
 

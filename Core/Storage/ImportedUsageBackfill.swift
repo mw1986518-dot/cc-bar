@@ -21,11 +21,16 @@ enum ImportedUsageBackfill {
             .appendingPathComponent(fileName, isDirectory: false)
     }
 
+    /// - Parameter url: 补录文件位置，nil 走生产路径；测试注入临时路径，不能读用户真实数据。
     /// 只返回 `existingDays` 里还没有的那些天，避免和实时扫描出来的数据重复计入。
     /// 调用方按当前聚合器里 `app` 已有的日期集合过滤，启动（bootstrap）和每轮扫描（runScan）
     /// 都重新判断，即使以后某天真扫描到了同一天的数据，这里会自动让位、不再重复导入。
-    nonisolated static func loadMissingEntries(app: UsageApp, existingDays: Set<Date>) -> [UsageEntry] {
-        guard let data = try? Data(contentsOf: fileURL()),
+    nonisolated static func loadMissingEntries(
+        app: UsageApp,
+        existingDays: Set<Date>,
+        from url: URL? = nil
+    ) -> [UsageEntry] {
+        guard let data = try? Data(contentsOf: url ?? fileURL()),
               let buckets = try? JSONDecoder().decode([UsageBucket].self, from: data)
         else {
             return []

@@ -503,6 +503,16 @@ struct SettingsRootView: View {
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                             .lineLimit(1)
+                    } else if !isRecalculatingUsage,
+                              let hint = rebuildOutcomeHint(appState.usageService.lastRebuildOutcome) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle")
+                            Text(hint)
+                        }
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                        .help(appState.usageService.lastRebuildDiagnostic ?? "")
                     }
                     Button {
                         isRecalculatingUsage = true
@@ -895,6 +905,45 @@ struct SettingsRootView: View {
         .buttonStyle(.plain)
         .focusEffectDisabled()
         .help(tr("Reset credits", "使用限额重置"))
+    }
+
+    /// 手动重算的结果提示。成功不提示（费用已在统计页可见）；被拒 / 失败必须说明
+    /// 「原历史保留」与下一步，和技术实现里的拒绝阈值一致。
+    private func rebuildOutcomeHint(_ outcome: UsageRebuildOutcome?) -> String? {
+        switch outcome {
+        case .rejectedUsageChanged:
+            return tr(
+                "Rebuild not applied: logs changed, previous history kept",
+                "重算未生效：日志已变化，保留原历史"
+            )
+        case .rejectedIncompleteSources:
+            return tr(
+                "Rebuild not applied: some logs unreadable",
+                "重算未生效：部分日志读取不完整"
+            )
+        case .commitFailed:
+            return tr(
+                "Rebuild could not be saved; previous history kept",
+                "重算保存失败：原历史未改动"
+            )
+        case .partiallyCommitted:
+            return tr(
+                "Partly applied: price refresh was not saved",
+                "部分生效：缺价刷新那一轮未保存"
+            )
+        case .restrictedRecoveryRejected:
+            return tr(
+                "Verification failed: history preserved, collection paused. Restore logs or resolve read/write errors before retrying.",
+                "核对失败：历史已保留，采集暂停。恢复日志或解决读写故障后再重试。"
+            )
+        case .replaced(cycleVerified: false):
+            return tr(
+                "Costs updated; cycle attribution differs and could not be verified",
+                "费用已更新；周期归属存在差异，完整性未确认"
+            )
+        case .replaced(cycleVerified: true), .recoveredFromRestrictedHistory, .none:
+            return nil
+        }
     }
 
     private func scanProgressText(_ progress: ScanProgress) -> String {

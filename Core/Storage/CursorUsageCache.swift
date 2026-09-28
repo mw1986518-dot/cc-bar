@@ -31,8 +31,9 @@ nonisolated enum CursorUsageCache {
     private static let fileName = "cursor-usage-rollup.json"
     private static let bundleDirectory = "CCBar"
 
-    static func load() -> CursorUsageCachePayload {
-        let url = fileURL()
+    /// - Parameter directory: 缓存目录，nil 走生产路径；测试注入临时目录。
+    static func load(in directory: URL? = nil) -> CursorUsageCachePayload {
+        let url = fileURL(in: directory)
         guard let data = try? Data(contentsOf: url),
               let payload = try? JSONDecoder().decode(CursorUsageCachePayload.self, from: data),
               payload.version == CursorUsageCachePayload.currentVersion
@@ -42,15 +43,18 @@ nonisolated enum CursorUsageCache {
         return payload
     }
 
-    static func save(_ payload: CursorUsageCachePayload) throws {
-        let url = fileURL()
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    static func save(_ payload: CursorUsageCachePayload, in directory: URL? = nil) throws {
+        let url = fileURL(in: directory)
+        let targetDirectory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(payload)
         try data.write(to: url, options: [.atomic])
     }
 
-    static func fileURL() -> URL {
+    static func fileURL(in directory: URL? = nil) -> URL {
+        if let directory {
+            return directory.appendingPathComponent(fileName, isDirectory: false)
+        }
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support", isDirectory: true)

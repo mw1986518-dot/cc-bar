@@ -4,8 +4,7 @@ import XCTest
 final class QuotaParsingTests: XCTestCase {
     override func setUp() {
         super.setUp()
-        // 测试宿主是 CCBar.app，PricingCatalogStore 单例启动时会读开发者机器的磁盘缓存；
-        // 清空内存态与磁盘缓存，让计价断言稳定基于内置本地表，不被本机远端价格目录漂移。
+        // 只重置内存价格并禁用网络，计价断言基于内置表，不写用户价格缓存。
         PricingCatalogStore.shared.resetCatalogForTesting()
     }
 

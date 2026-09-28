@@ -57,6 +57,26 @@ enum DshSessionScanner {
             .appendingPathComponent(".dsh/sessions", isDirectory: true)
     }
 
+    /// 冻结该分区时使用的空结果：不产生条目、不改变任何 watermark。
+    /// 主历史含 DSH 分区但逐会话贡献不可用时走这里：既不增量也不能重建。
+    nonisolated static func frozenResult(preserving state: [String: ScanFileState]) -> Result {
+        Result(
+            entries: [],
+            entriesByPath: [:],
+            previousPaths: Set(state.keys),
+            duplicateSessionIDs: [],
+            conversationSeeds: [],
+            newState: state,
+            filesScanned: 0,
+            failedFileCount: 0,
+            failedDirectoryCount: 0,
+            duplicateSessionCount: 0,
+            duplicateEncodingCount: 0,
+            restartedSessionIDs: [],
+            totalTokensMismatchCount: 0
+        )
+    }
+
     nonisolated static func scan(
         previous: [String: ScanFileState],
         onProgress: ScanProgressCallback? = nil

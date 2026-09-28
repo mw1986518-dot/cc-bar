@@ -956,23 +956,65 @@ private struct StatsOverviewScope: Hashable {
 private struct StatsUsageErrorBanner: View {
     @Environment(AppState.self) private var appState
 
+    private func historyMessage(notice: UsageHistoryRecoveryNotice?, hasError: Bool) -> String {
+        if notice?.isUnavailable == true {
+            return tr(
+                "No valid local usage history could be loaded. Files are preserved; collection is paused. Restore a valid backup before restarting.",
+                "无法加载有效的本地用量历史。原文件已保留，采集已暂停；请恢复有效备份后重启。"
+            )
+        }
+        if notice?.isReadOnly == true {
+            return tr(
+                "The history format is unsupported. Only a compatible backup, if available, can be shown. Collection is paused; use a compatible app version.",
+                "历史格式不受支持，仅展示可读取的备份（如有）。采集已暂停，请使用兼容版本。"
+            )
+        }
+        if notice?.isRestricted == true {
+            return notice?.verificationRejected == true
+                ? tr("History verification failed. Available history is preserved; local collection is paused. Retry only after restoring logs or resolving read/write errors; changed usage cannot be merged safely.",
+                     "历史核对未通过。可用历史已保留，本地采集已暂停。恢复日志或解决读写故障后可重试；已变化的用量无法安全合并。")
+                : tr("Available history is preserved. Local collection is paused until history and scan progress can be verified.",
+                     "可用历史已保留。历史与扫描进度通过核对前，本地采集暂停。")
+        }
+        if notice?.isDshFrozen == true {
+            return tr("DSH history is preserved, but its session contributions are unavailable. DSH collection is paused; other services continue.",
+                      "DSH 历史已保留，但逐会话贡献不可用，DSH 采集暂停；其他服务继续采集。")
+        }
+        return hasError
+            ? tr("Usage statistics may be incomplete. Available data is preserved; retry or recalculate in Settings.",
+                 "用量统计可能不完整。可用的已有数据会保留，请稍后重试或前往设置重新计算。")
+            : tr("Usage history was restored from the last complete commit. Logs deleted after that point cannot be recovered.",
+                 "本地用量已从上一份完整提交恢复。该时点之后被删除的日志无法补回。")
+    }
+
     var body: some View {
-        if let error = appState.usageService.lastError {
+        let error = appState.usageService.lastError
+        let notice = appState.usageService.historyRecoveryNotice
+        if error != nil || notice != nil {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 11))
-                Text(tr(
-                    "Usage statistics may be incomplete. Available data is preserved; retry or recalculate in Settings.",
-                    "用量统计可能不完整。可用的已有数据会保留，请稍后重试或前往设置重新计算。"
-                ))
-                .font(.system(size: 11.5))
-                .lineLimit(2)
-                Spacer(minLength: 8)
-                Button(tr("Open Settings", "打开设置")) {
-                    appState.mainTab = .settings
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(historyMessage(notice: notice, hasError: error != nil))
+                    .font(.system(size: 11.5))
+                    .fixedSize(horizontal: false, vertical: true)
+                    if let notice, let restoredAt = notice.restoredFromPreviousAt {
+                        Text(tr(
+                            "Restored to the commit from \(restoredAt.formatted(date: .abbreviated, time: .shortened)).",
+                            "恢复到的提交时点：\(restoredAt.formatted(date: .abbreviated, time: .shortened))。"
+                        ))
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                    }
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                Spacer(minLength: 8)
+                if error != nil, notice?.isReadOnly != true, notice?.isDshFrozen != true {
+                    Button(tr("Open Settings", "打开设置")) {
+                        appState.mainTab = .settings
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
             }
             .foregroundStyle(.orange)
             .padding(.horizontal, 16)
@@ -980,7 +1022,7 @@ private struct StatsUsageErrorBanner: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.orange.opacity(0.08))
             .overlay(alignment: .bottom) { Divider() }
-            .help(error)
+            .help(error ?? "")
         }
     }
 }

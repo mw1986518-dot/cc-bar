@@ -16,6 +16,13 @@
 		49C1BE10000000000001AAAA /* DshSessionScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1BE0D000000000001AAAA /* DshSessionScannerTests.swift */; };
 		49C1BE11000000000001AAAA /* DshTestFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1BE0E000000000001AAAA /* DshTestFixtures.swift */; };
 		49C1BE16000000000001AAAA /* DshContributionCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1BE12000000000001AAAA /* DshContributionCache.swift */; };
+		49C2AA02000000000001AAAA /* UsageSnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2AA01000000000001AAAA /* UsageSnapshotStore.swift */; };
+		49C2AA04000000000001AAAA /* LegacyUsageHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2AA03000000000001AAAA /* LegacyUsageHistory.swift */; };
+		49C2AA06000000000001AAAA /* UsageHistoryConsistency.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2AA05000000000001AAAA /* UsageHistoryConsistency.swift */; };
+		49C2AA08000000000001AAAA /* UsageSnapshotStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2AA07000000000001AAAA /* UsageSnapshotStoreTests.swift */; };
+		49C2AA0A000000000001AAAA /* UsageHistoryRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2AA09000000000001AAAA /* UsageHistoryRecoveryTests.swift */; };
+		49C2AA0C000000000001AAAA /* UsageSafeRebuildTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2AA0B000000000001AAAA /* UsageSafeRebuildTests.swift */; };
+		49C2AA0E000000000001AAAA /* UsageHistoryTestHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2AA0D000000000001AAAA /* UsageHistoryTestHarness.swift */; };
 		49C1BE17000000000001AAAA /* DshContributionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1BE13000000000001AAAA /* DshContributionStore.swift */; };
 		49C1BE18000000000001AAAA /* DshContributionRollup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1BE14000000000001AAAA /* DshContributionRollup.swift */; };
 		49C1BE19000000000001AAAA /* DshContributionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1BE15000000000001AAAA /* DshContributionTests.swift */; };
@@ -214,6 +221,13 @@
 		49C1BE0D000000000001AAAA /* DshSessionScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshSessionScannerTests.swift; sourceTree = "<group>"; };
 		49C1BE0E000000000001AAAA /* DshTestFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshTestFixtures.swift; sourceTree = "<group>"; };
 		49C1BE12000000000001AAAA /* DshContributionCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshContributionCache.swift; sourceTree = "<group>"; };
+		49C2AA01000000000001AAAA /* UsageSnapshotStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageSnapshotStore.swift; sourceTree = "<group>"; };
+		49C2AA03000000000001AAAA /* LegacyUsageHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyUsageHistory.swift; sourceTree = "<group>"; };
+		49C2AA05000000000001AAAA /* UsageHistoryConsistency.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageHistoryConsistency.swift; sourceTree = "<group>"; };
+		49C2AA07000000000001AAAA /* UsageSnapshotStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageSnapshotStoreTests.swift; sourceTree = "<group>"; };
+		49C2AA09000000000001AAAA /* UsageHistoryRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageHistoryRecoveryTests.swift; sourceTree = "<group>"; };
+		49C2AA0B000000000001AAAA /* UsageSafeRebuildTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageSafeRebuildTests.swift; sourceTree = "<group>"; };
+		49C2AA0D000000000001AAAA /* UsageHistoryTestHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageHistoryTestHarness.swift; sourceTree = "<group>"; };
 		49C1BE13000000000001AAAA /* DshContributionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshContributionStore.swift; sourceTree = "<group>"; };
 		49C1BE14000000000001AAAA /* DshContributionRollup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshContributionRollup.swift; sourceTree = "<group>"; };
 		49C1BE15000000000001AAAA /* DshContributionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshContributionTests.swift; sourceTree = "<group>"; };
@@ -388,6 +402,8 @@
 				49C1BA10000000000001AAAA /* QuotaCycleStore.swift */,
 				49C1B107000000000001AAAA /* ScanCache.swift */,
 				49C1BE12000000000001AAAA /* DshContributionCache.swift */,
+				49C2AA01000000000001AAAA /* UsageSnapshotStore.swift */,
+				49C2AA03000000000001AAAA /* LegacyUsageHistory.swift */,
 				49C1B168000000000001AAAA /* ConversationRollupCache.swift */,
 				49C1B196000000000001AAAA /* ImportedUsageBackfill.swift */,
 				49C1BC13000000000001AAAA /* CursorUsageCache.swift */,
@@ -470,6 +486,7 @@
 				49C1BC14000000000001AAAA /* CursorUsageFetcher.swift */,
 				49C1B16A000000000001AAAA /* ModelProvider.swift */,
 				49C1B156000000000001AAAA /* UsageService.swift */,
+				49C2AA05000000000001AAAA /* UsageHistoryConsistency.swift */,
 				49C1B197000000000001AAAA /* UsageLogWatcher.swift */,
 				49C1BA11000000000001AAAA /* CycleUsage.swift */,
 				49C1B165000000000001AAAA /* ConversationModels.swift */,
@@ -535,6 +552,10 @@
 				49C1BE1C000000000001AAAA /* DshDiagnosticsTests.swift */,
 				49C1BF0A000000000001AAAA /* ConversationProjectResolverTests.swift */,
 				49C1BF09000000000001AAAA /* UpdateCheckerTests.swift */,
+				49C2AA07000000000001AAAA /* UsageSnapshotStoreTests.swift */,
+				49C2AA09000000000001AAAA /* UsageHistoryRecoveryTests.swift */,
+				49C2AA0B000000000001AAAA /* UsageSafeRebuildTests.swift */,
+				49C2AA0D000000000001AAAA /* UsageHistoryTestHarness.swift */,
 				49C1B3F2000000000001AAAA /* Fixtures */,
 			);
 			path = CCBarTests;
@@ -729,9 +750,12 @@
 				49C1BE17000000000001AAAA /* DshContributionStore.swift in Sources */,
 				49C1BE18000000000001AAAA /* DshContributionRollup.swift in Sources */,
 				49C1BE16000000000001AAAA /* DshContributionCache.swift in Sources */,
+				49C2AA02000000000001AAAA /* UsageSnapshotStore.swift in Sources */,
+				49C2AA04000000000001AAAA /* LegacyUsageHistory.swift in Sources */,
 				49C1B155000000000001AABB /* UsageAggregator.swift in Sources */,
 				49C1B16A000000000001AABB /* ModelProvider.swift in Sources */,
 				49C1B156000000000001AABB /* UsageService.swift in Sources */,
+				49C2AA06000000000001AAAA /* UsageHistoryConsistency.swift in Sources */,
 				49C1B197000000000001AABB /* UsageLogWatcher.swift in Sources */,
 				49C1BA11000000000001AABB /* CycleUsage.swift in Sources */,
 				49C1B157000000000001AABB /* PricingCatalogModels.swift in Sources */,
@@ -783,6 +807,10 @@
 				49C1BE11000000000001AAAA /* DshTestFixtures.swift in Sources */,
 				49C1BE19000000000001AAAA /* DshContributionTests.swift in Sources */,
 				49C1BE1F000000000001AAAA /* DshAggregationRegressionTests.swift in Sources */,
+				49C2AA08000000000001AAAA /* UsageSnapshotStoreTests.swift in Sources */,
+				49C2AA0A000000000001AAAA /* UsageHistoryRecoveryTests.swift in Sources */,
+				49C2AA0C000000000001AAAA /* UsageSafeRebuildTests.swift in Sources */,
+				49C2AA0E000000000001AAAA /* UsageHistoryTestHarness.swift in Sources */,
 				49C1BE1B000000000001AAAA /* DshPricingTests.swift in Sources */,
 				49C1BE1D000000000001AAAA /* DshDiagnosticsTests.swift in Sources */,
 				49C1BF0A000000000001AABB /* ConversationProjectResolverTests.swift in Sources */,
