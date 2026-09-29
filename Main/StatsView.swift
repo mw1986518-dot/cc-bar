@@ -229,9 +229,14 @@ enum StatsGranularity: Hashable, CaseIterable {
         }
     }
 
-    /// 单周期上下文窗口显示多少个周期（含所选那个）。三种粒度共用同一个值，
-    /// 柱数落在 `StatsOverviewModel.barWidth` 的 4~14 根档位里，粒度切换时柱宽不跳变。
-    static let contextWindowPeriods = 14
+    /// 单周期上下文窗口显示多少个周期（含所选那个）。日粒度取近 30 天，与「近 30 天」范围的柱数、柱宽一致；
+    /// 周 / 月取 14 个，跨度约一个季度 / 一年多，再长的上下文对单周期对比意义不大。
+    var contextWindowPeriods: Int {
+        switch self {
+        case .day: return 30
+        case .week, .month: return 14
+        }
+    }
 
     /// 上下文窗口按该单位往前推：日 → 天，周 → 周，月 → 月。
     var contextWindowComponent: Calendar.Component {
@@ -244,7 +249,7 @@ enum StatsGranularity: Hashable, CaseIterable {
 
     var contextWindowHintEnglish: String {
         switch self {
-        case .day: return "Last 14 days · highlighted = selected"
+        case .day: return "Last 30 days · highlighted = selected"
         case .week: return "Last 14 weeks · highlighted = selected"
         case .month: return "Last 14 months · highlighted = selected"
         }
@@ -252,7 +257,7 @@ enum StatsGranularity: Hashable, CaseIterable {
 
     var contextWindowHintChinese: String {
         switch self {
-        case .day: return "近 14 天 · 高亮为所选范围"
+        case .day: return "近 30 天 · 高亮为所选范围"
         case .week: return "近 14 周 · 高亮为所选范围"
         case .month: return "近 14 个月 · 高亮为所选范围"
         }
@@ -322,11 +327,6 @@ enum StatsViewMode: Hashable, CaseIterable {
     case projects
     /// 额度：当前周期卡 + 额度变化时间线（原 Cycles 与 Timeline 合并）。
     case quota
-}
-
-/// 统计页内的跨视图跳转请求（概览 → 对话 / 项目，项目 → 对话等）。
-/// 目标视图出现或请求变化时消费并清空；`id` 保证重复点击同一目标也会生效。
-struct StatsNavigationRequest: Equatable {
 
     /// 顶栏页面标题，与侧栏视图项同名。
     @MainActor
@@ -338,6 +338,11 @@ struct StatsNavigationRequest: Equatable {
         case .quota: return tr("Quota", "额度")
         }
     }
+}
+
+/// 统计页内的跨视图跳转请求（概览 → 对话 / 项目，项目 → 对话等）。
+/// 目标视图出现或请求变化时消费并清空；`id` 保证重复点击同一目标也会生效。
+struct StatsNavigationRequest: Equatable {
     enum Target: Equatable {
         case conversation(String)
         case conversationsByCost
@@ -396,11 +401,6 @@ struct StatsView: View {
             VStack(spacing: 0) {
                 StatsUsageErrorBanner()
 
-                switch viewMode {
-                case .conversations:
-                    ConversationStatsView(
-                        granularity: $granularity,
-                        range: $range,
                 // 顶栏由四个视图共用、放在页面内容之外：切换视图时是同一个视图，
                 // 粒度 / 范围控件和日期选择器的位置不跳、不重建；也不随概览 / 额度页滚动。
                 topBar
@@ -409,6 +409,11 @@ struct StatsView: View {
                     .opacity(showsTopBarDivider ? 1 : 0)
                     .animation(.easeOut(duration: 0.15), value: showsTopBarDivider)
 
+                switch viewMode {
+                case .conversations:
+                    ConversationStatsView(
+                        granularity: $granularity,
+                        range: $range,
                         customFrom: $customFrom,
                         customTo: $customTo,
                         serviceFilter: serviceFilter,
@@ -435,33 +440,28 @@ struct StatsView: View {
                         ScrollView {
                             mainContent(canvasWidth: proxy.size.width, canvasHeight: proxy.size.height)
                         }
+                        .onScrolledPastTop { canvasScrolled = $0 }
                     }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-                        .onScrolledPastTop { canvasScrolled = $0 }
         .onAppear { reconcileServiceFilter() }
         .onChange(of: SettingsStore.shared.usageServiceVisibility) { _, _ in
             reconcileServiceFilter()
         }
         .onChange(of: viewMode) { _, mode in
             reconcileServiceFilter()
+            // 离开滚动画布后清掉滚动状态，回到概览 / 额度时新画布从顶部开始。
+            if mode == .projects || mode == .conversations { canvasScrolled = false }
         }
         .onChange(of: granularity) { _, _ in reconcileRange() }
         .task(id: cursorHistoryRequest) {
             guard let request = cursorHistoryRequest else { return }
             await appState.loadCursorUsageHistory(for: request.range)
-            // 离开滚动画布后清掉滚动状态，回到概览 / 额度时新画布从顶部开始。
-            if mode == .projects || mode == .conversations { canvasScrolled = false }
         }
     }
 
-    /// 宽度断点:主画布达到该宽度时,概览与额度页的面板左右并排;
-    /// 更窄(如最小窗口)时回落单列堆叠,避免内容挤压截断。
-    static let wideCanvasWidth: CGFloat = 880
-
-    /// 默认窗口 1440×900 下的一屏高度分配：概览下排（用量构成 + 高消耗对话）至少 390pt，
     /// 顶栏分隔线：对话 / 项目页下方是贴边的左右分栏，一直显示，与分栏竖线相接；
     /// 概览 / 额度页是卡片，静止时只靠间距与顶栏分开，内容滚到顶栏下方后才显示。
     private var showsTopBarDivider: Bool {
@@ -471,8 +471,13 @@ struct StatsView: View {
         }
     }
 
+    /// 宽度断点:主画布达到该宽度时,概览与额度页的面板左右并排;
+    /// 更窄(如最小窗口)时回落单列堆叠,避免内容挤压截断。
+    static let wideCanvasWidth: CGFloat = 880
+
+    /// 默认窗口 1440×900 下的一屏高度分配：概览下排（用量构成 + 高消耗对话）至少 390pt，
     /// 用量柱状图那一排吃掉剩余高度、260~300pt；额度页折线图吃掉剩余高度、最低 170pt。
-    /// 其他区块变高（展开提供商、展开变动明细）时由这一块让出高度，降到下限后整页滚动。
+    /// 用量构成列表区固定高度、内部滚动，不会撑高下排；额度页展开变动明细时由折线图让出高度，降到下限后整页滚动。
     static let overviewBottomRowMinHeight: CGFloat = 390
     static let overviewUsageRowMinHeight: CGFloat = 260
     /// 柱状图那一排的上限：窗口比默认高很多时不再继续拉高，多出的高度留在页面底部，
@@ -1061,7 +1066,7 @@ struct StatsView: View {
     }
 
     /// 所选范围只落在**一个当前粒度周期**内(日:今天 / 昨天 / 单日自定义;周:本周 / 上周;
-    /// 月:本月 / 上月;以及不跨周期的自定义)时,用量图表扩展为近 14 个周期的上下文,
+    /// 月:本月 / 上月;以及不跨周期的自定义)时,用量图表扩展为近若干周期的上下文(日 30、周 / 月 14),
     /// 范围内柱子高亮、范围外降透明;KPI 与其他面板口径不变。
     private var chartUsesContextWindow: Bool {
         guard range != .all else { return false }
@@ -1083,14 +1088,14 @@ struct StatsView: View {
         return cal.startOfDay(for: rangeBounds.to.addingTimeInterval(-1))
     }
 
-    /// 图表展示窗口:上下文模式取「所选周期起点往前 13 个周期」,连所选那个共 14 个。
+    /// 图表展示窗口:上下文模式取「所选周期起点往前 N−1 个周期」,连所选那个共 N 个(`contextWindowPeriods`)。
     /// 从周期起点往前推而不是从范围结束时刻往前推,首柱才是完整的周 / 月,不会天然偏矮。
     private var chartBounds: (from: Date, to: Date) {
         let bounds = rangeBounds
         guard chartUsesContextWindow else { return bounds }
         let cal = StatsRange.weekStartMondayCalendar
         let from = cal.date(byAdding: granularity.contextWindowComponent,
-                            value: -(StatsGranularity.contextWindowPeriods - 1),
+                            value: -(granularity.contextWindowPeriods - 1),
                             to: selectedPeriodStart) ?? bounds.from
         return (min(from, bounds.from), bounds.to)
     }
@@ -1137,6 +1142,7 @@ struct StatsView: View {
 
     /// 当前范围外的历史由 Stats 选择时按月静默补拉；All 没有可靠的远端起点，
     /// 所以只使用现有缓存，绝不偷偷发起无界回溯。项目页的「未归属」也包含 Cursor，同样补拉。
+    /// 起点同时覆盖上一周期与图表上下文窗口，避免上下文柱里的 Cursor 用量因未补拉而显示为空。
     private var cursorHistoryRequest: CursorHistoryRequest? {
         guard viewMode == .overview || viewMode == .projects,
               cursorUsageIsInCurrentScope,
@@ -1145,7 +1151,8 @@ struct StatsView: View {
         else { return nil }
 
         let current = rangeBounds
-        let requested = previousRangeBounds.map { $0.from..<current.to } ?? current.from..<current.to
+        let from = min(previousRangeBounds?.from ?? current.from, chartBounds.from)
+        let requested = from..<current.to
         guard !appState.usageService.isCursorRemoteUsageCovered(requested) else { return nil }
         return CursorHistoryRequest(accountID: accountID, from: requested.lowerBound, to: requested.upperBound)
     }
@@ -1698,10 +1705,11 @@ private struct OverviewCompositionPanel: View {
 
                     VStack(spacing: 0) {
                         columnHeader
-                        ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                            if index > 0 { Divider() }
-                            rowView(row)
+                        ScrollView(.vertical) {
+                            rowList(rows)
                         }
+                        .scrollBounceBehavior(.basedOnSize)
+                        .frame(height: Self.listHeight)
                     }
 
                     // 合计行贴面板底部：行数少（如只有 3 个服务）时留白落在列表与合计之间，面板仍收得住。
@@ -1736,15 +1744,28 @@ private struct OverviewCompositionPanel: View {
         }
     }
 
+    /// 列表区固定高度（约 5.8 行双行行高，露出半行提示可滚动），四个维度与提供商展开都在区内滚动，
+    /// 面板高度不随维度、行数变化；面板总高约 376pt，低于下排 390pt 下限，切换维度不挤压上方柱状图。
+    private static let listHeight: CGFloat = 240
+
+    private func rowList(_ rows: [CompositionRow]) -> some View {
+        VStack(spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                if index > 0 { Divider() }
+                rowView(row)
+            }
+        }
+    }
+
     /// 列名行，列宽与 `rowContent` 一致。
     private var columnHeader: some View {
         HStack(spacing: 8) {
             Color.clear.frame(width: 8, height: 1)
             Text(dimension.label)
             Spacer(minLength: 8)
-            Text(tr("Share", "占比")).frame(width: 46, alignment: .trailing)
             Text("Tokens").frame(width: 86, alignment: .trailing)
             Text(tr("Cost", "费用")).frame(width: 86, alignment: .trailing)
+            Text(tr("Share", "占比")).frame(width: 46, alignment: .trailing)
             Text(tr("Cache hit", "缓存命中率")).frame(width: 64, alignment: .trailing)
             Color.clear.frame(width: 10, height: 1)
         }
@@ -1793,7 +1814,8 @@ private struct OverviewCompositionPanel: View {
     }
 
     private func rowContent(_ row: CompositionRow, isExpanded: Bool) -> some View {
-        let isSecondary = row.kind != .item
+        // 未归属与不参与排名的灰色行（「其他」提供商、特殊项目）用次级样式。
+        let isSecondary = row.kind != .item || row.color == .rest
         return HStack(spacing: 8) {
             CompositionSwatch(role: row.color, size: 8)
             VStack(alignment: .leading, spacing: 1) {
@@ -1811,13 +1833,10 @@ private struct OverviewCompositionPanel: View {
                 }
             }
             Spacer(minLength: 8)
-            Text(StatsFormatter.percent(model.share(of: row.totals)))
-                .font(.system(size: 12, weight: .semibold))
-                .monospacedDigit()
-                .frame(width: 46, alignment: .trailing)
+            // Tokens 与费用是本面板的主数据：紧跟名称、13pt semibold，比同页 12.5pt 的数值略重；
+            // 占比已由顶部占比条表达，与缓存命中率一起降为次级。
             Text("\(StatsFormatter.compactToken(row.totals.totalTokens))")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 13, weight: .semibold))
                 .monospacedDigit()
                 .frame(width: 86, alignment: .trailing)
             Text(StatsFormatter.tierCost(
@@ -1825,9 +1844,14 @@ private struct OverviewCompositionPanel: View {
                 hasUnpricedUsage: row.totals.hasUnpricedUsage,
                 costIncomplete: row.totals.costIncomplete
             ))
-            .font(.system(size: 12.5, weight: .semibold))
+            .font(.system(size: 13, weight: .semibold))
             .monospacedDigit()
             .frame(width: 86, alignment: .trailing)
+            Text(StatsFormatter.percent(model.share(of: row.totals)))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 46, alignment: .trailing)
             Text(hitRateText(row.totals.cacheHitRate))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -1859,32 +1883,35 @@ private struct OverviewCompositionPanel: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 8)
-            Text("\(StatsFormatter.compactToken(row.totals.totalTokens)) Tokens")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
+            // 数值列与父行的 Tokens / 费用列对齐（同样 8pt 间距），占比、命中率、箭头位留空。
+            HStack(spacing: 8) {
+                Text(StatsFormatter.compactToken(row.totals.totalTokens))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(width: 86, alignment: .trailing)
+                Text(StatsFormatter.tierCost(
+                    row.totals.costUSD,
+                    hasUnpricedUsage: row.totals.hasUnpricedUsage,
+                    costIncomplete: row.totals.costIncomplete
+                ))
+                .font(.system(size: 11.5, weight: .semibold))
                 .monospacedDigit()
-            Text(StatsFormatter.tierCost(
-                row.totals.costUSD,
-                hasUnpricedUsage: row.totals.hasUnpricedUsage,
-                costIncomplete: row.totals.costIncomplete
-            ))
-            .font(.system(size: 11.5, weight: .semibold))
-            .monospacedDigit()
-            .frame(width: 86, alignment: .trailing)
-            Color.clear.frame(width: 64 + 6, height: 1)
-            Color.clear.frame(width: 10, height: 1)
+                .frame(width: 86, alignment: .trailing)
+                Color.clear.frame(width: 46, height: 1)
+                Color.clear.frame(width: 64, height: 1)
+                Color.clear.frame(width: 10, height: 1)
+            }
         }
     }
 
     private func title(for row: CompositionRow) -> String {
         switch row.kind {
         case .item:
-            return row.title
-        case .rest(let count):
-            switch dimension {
-            case .service, .provider: return tr("Other", "其他")
-            case .model: return tr("\(count) other models", "其余 \(count) 个模型")
-            case .project: return tr("\(count) other projects", "其余 \(count) 个项目")
+            switch row.projectStatus {
+            case .unassigned: return tr("No project", "无明确项目")
+            case .system: return tr("CCBar system tasks", "CCBar 系统任务")
+            default: return row.title
             }
         case .unattributed:
             return tr("Unattributed", "未归属")
@@ -1893,6 +1920,11 @@ private struct OverviewCompositionPanel: View {
 
     /// 未归属的说明原先是面板底部单独一行，现在并入该行副标。
     private func subtitle(for row: CompositionRow) -> String {
+        switch row.projectStatus {
+        case .unassigned: return tr("Started from home or a temporary folder", "从主目录或临时目录启动的对话")
+        case .system: return tr("Usage created by CCBar background tasks", "CCBar 后台任务产生的用量")
+        default: break
+        }
         guard row.kind == .unattributed else { return row.subtitle }
         return tr(
             "Cursor remote, backfilled and early history have no project info",
@@ -2298,13 +2330,36 @@ struct StatsTopBar<Detail: View>: View {
                     customDates(from: $customFrom, to: $customTo)
                 }
             }
+            .frame(minWidth: 0, idealWidth: 0, maxWidth: .infinity, alignment: .leading)
         }
+        .frame(minHeight: 24)
+    }
+
+    private func titleText(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 17, weight: .bold))
+            .kerning(-0.4)
+            .lineLimit(1)
+            .fixedSize()
+    }
+
+    private func customDates(from: Binding<Date>, to: Binding<Date>) -> some View {
+        HStack(spacing: 6) {
+            DatePicker(tr("From", "起"), selection: from, displayedComponents: .date)
+            Text("–")
+                .foregroundStyle(.secondary)
+            DatePicker(tr("To", "止"), selection: to, in: from.wrappedValue..., displayedComponents: .date)
+        }
+        .labelsHidden()
+        .datePickerStyle(.compact)
+        .fixedSize()
     }
 
     private var granularityBar: some View {
         SegmentedBar(items: StatsGranularity.allCases,
                      label: { tr($0.englishLabel, $0.chineseLabel) },
                      selection: $granularity)
+            .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -2330,36 +2385,13 @@ struct StatsRangePicker: View {
             SegmentedBar(items: StatsGranularity.day.ranges,
                          label: { tr($0.englishLabel, $0.chineseLabel) },
                          selection: .constant(StatsRange.today),
-            .frame(minWidth: 0, idealWidth: 0, maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(minHeight: 24)
-    }
-
-    private func titleText(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 17, weight: .bold))
-            .kerning(-0.4)
-            .lineLimit(1)
-            .fixedSize()
-    }
-
-    private func customDates(from: Binding<Date>, to: Binding<Date>) -> some View {
-        HStack(spacing: 6) {
-            DatePicker(tr("From", "起"), selection: from, displayedComponents: .date)
-            Text("–")
-                .foregroundStyle(.secondary)
-            DatePicker(tr("To", "止"), selection: to, in: from.wrappedValue..., displayedComponents: .date)
                          uniformSegments: true)
-        .labelsHidden()
-        .datePickerStyle(.compact)
-        .fixedSize()
                 .hidden()
                 .overlay { bar }
         }
     }
 
     private var bar: some View {
-            .fixedSize(horizontal: true, vertical: false)
         SegmentedBar(items: granularity.ranges,
                      label: { tr($0.englishLabel, $0.chineseLabel) },
                      selection: $range,

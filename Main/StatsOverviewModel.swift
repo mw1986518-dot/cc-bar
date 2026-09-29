@@ -300,7 +300,7 @@ enum CompositionColorRole: Equatable {
     case service(UsageApp)
     /// 非服务维度按排名套紫色色阶，0 为第 1 名。
     case rank(Int)
-    /// 「其他 / 其余」固定中性灰。
+    /// 不参与排名的行（「其他」提供商、无明确项目 / CCBar 系统任务）固定中性灰。
     case rest
     /// 「未归属」固定灰色斜纹。
     case unattributed
@@ -308,8 +308,6 @@ enum CompositionColorRole: Equatable {
 
 enum CompositionRowKind: Equatable {
     case item
-    /// 合并行；`count` 为被合并的项数（提供商维度不显示数量）。
-    case rest(count: Int)
     case unattributed
 }
 
@@ -336,16 +334,13 @@ struct CompositionRow: Identifiable {
     var providerModels: [ProviderModelRow] = []
     /// 模型行的来源服务 / 提供商行的来源服务。
     var apps: [UsageApp] = []
+    /// 项目行的归属状态；特殊项目（无明确项目 / 系统任务）的名称与副标由视图本地化。
+    var projectStatus: ConversationProjectStatus?
 }
 
-/// 四个维度的合并规则（需求 §3.1）：服务全部列出；提供商前 3 + 其他；
-/// 模型前 5 + 其余 N 个模型；项目前 4 + 其余 N 个项目 + 未归属。
-/// 都按 API 等值降序，同值按名称；合并行与未归属固定在最后。
+/// 四个维度都全部列出、不合并（需求 §3.1），行多时由视图在列表区内滚动。
+/// 都按 API 等值降序，同值按名称；「其他」提供商、特殊项目与未归属不参与排名，固定在最后。
 enum CompositionBuilder {
-    static let providerLimit = 3
-    static let modelLimit = 5
-    static let projectLimit = 4
-
     static func serviceRows(
         apps: [UsageApp],
         totals: [UsageApp: UsageTotals],
@@ -377,15 +372,14 @@ enum CompositionBuilder {
     static func providerRows(_ groups: [ProviderGroup]) -> [CompositionRow] {
         let sorted = ProviderGroup.sorted(groups, by: .cost)
         let ranked = sorted.filter { $0.provider != .other }
-        let top = Array(ranked.prefix(providerLimit))
-        let restGroups = sorted.filter { group in !top.contains { $0.provider == group.provider } }
-        var rows = top.enumerated().map { index, group in
+        let ordered = ranked + sorted.filter { $0.provider == .other }
+        return ordered.enumerated().map { index, group in
             CompositionRow(
                 id: "provider:\(group.provider.rawValue)",
                 kind: .item,
                 title: group.provider.displayName,
                 subtitle: UsageApp.allCases.filter { group.sources.contains($0) }.map(\.displayName).joined(separator: " · "),
-                color: .rank(index),
+                color: group.provider == .other ? .rest : .rank(index),
                 totals: group.totals,
                 speed: group.speed,
                 action: .expandProvider(group.provider),
@@ -393,19 +387,6 @@ enum CompositionBuilder {
                 apps: UsageApp.allCases.filter { group.sources.contains($0) }
             )
         }
-        if let rest = mergedRest(restGroups.map { ($0.totals, $0.speed) }) {
-            rows.append(CompositionRow(
-                id: "provider:rest",
-                kind: .rest(count: restGroups.count),
-                title: "",
-                subtitle: restGroups.map(\.provider.displayName).joined(separator: " · "),
-                color: .rest,
-                totals: rest.totals,
-                speed: rest.speed,
-                action: .none
-            ))
-        }
-        return rows
     }
 
     static func modelRows(
@@ -433,8 +414,7 @@ enum CompositionBuilder {
                 ? lhs.key < rhs.key
                 : lhs.value.totals.costUSD > rhs.value.totals.costUSD
         }
-        let top = sorted.prefix(modelLimit)
-        var rows = top.enumerated().map { index, element in
+        return sorted.enumerated().map { index, element in
             let apps = UsageApp.allCases.filter { element.value.apps.contains($0) }
             let providers = ModelProvider.allCases.filter { element.value.providers.contains($0) }
             return CompositionRow(
@@ -449,51 +429,23 @@ enum CompositionBuilder {
                 apps: apps
             )
         }
-        let rest = sorted.dropFirst(modelLimit)
-        if let merged = mergedRest(rest.map { ($0.value.totals, $0.value.speed) }) {
-            rows.append(CompositionRow(
-                id: "model:rest",
-                kind: .rest(count: rest.count),
-                title: "",
-                subtitle: "",
-                color: .rest,
-                totals: merged.totals,
-                speed: merged.speed,
-                action: .none
-            ))
-        }
-        return rows
     }
 
     /// `projects` 需已按 `ConversationAggregator.projectOrder` 排好（特殊项目在最后）。
     static func projectRows(_ projects: [ProjectUsageRow], unattributed: UsageTotals) -> [CompositionRow] {
-        let ranked = projects.filter { !$0.isSpecial }
-        let top = Array(ranked.prefix(projectLimit))
-        let restProjects = projects.filter { project in !top.contains { $0.key == project.key } }
-        var rows = top.enumerated().map { index, project in
+        var rows = projects.enumerated().map { index, project in
             CompositionRow(
                 id: "project:\(project.key)",
                 kind: .item,
                 title: project.name,
                 subtitle: pathTail(project.path),
-                color: .rank(index),
+                color: project.isSpecial ? .rest : .rank(index),
                 totals: project.totals,
                 speed: project.speed,
                 action: .openProject(project.key),
-                apps: UsageApp.allCases.filter { project.totalsByApp[$0]?.hasUsage == true }
+                apps: UsageApp.allCases.filter { project.totalsByApp[$0]?.hasUsage == true },
+                projectStatus: project.status
             )
-        }
-        if let merged = mergedRest(restProjects.map { ($0.totals, $0.speed) }) {
-            rows.append(CompositionRow(
-                id: "project:rest",
-                kind: .rest(count: restProjects.count),
-                title: "",
-                subtitle: "",
-                color: .rest,
-                totals: merged.totals,
-                speed: merged.speed,
-                action: .none
-            ))
         }
         if unattributed.hasUsage {
             rows.append(CompositionRow(
@@ -528,18 +480,6 @@ enum CompositionBuilder {
         }
     }
 
-    private static func mergedRest(
-        _ items: [(UsageTotals, UsageSpeedBreakdown)]
-    ) -> (totals: UsageTotals, speed: UsageSpeedBreakdown)? {
-        guard !items.isEmpty else { return nil }
-        var totals = UsageTotals.zero
-        var speed = UsageSpeedBreakdown()
-        for (itemTotals, itemSpeed) in items {
-            totals.add(itemTotals)
-            speed.merge(itemSpeed)
-        }
-        return totals.hasUsage ? (totals, speed) : nil
-    }
 }
 
 /// 「提供商」分组的排序键；用量构成统一按 API 等值（`.cost`），其余键保留给测试与后续使用。
