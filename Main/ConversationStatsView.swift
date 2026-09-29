@@ -31,8 +31,6 @@ struct ConversationStatsView: View {
     var body: some View {
         let result = queryResult
         VStack(spacing: 0) {
-            toolbar
-            Divider()
             HSplitView {
                 // 分栏尺寸与项目页共用（`StatsSplitMetrics`），切换视图时分隔线不跳。
                 conversationList(result)
@@ -68,40 +66,6 @@ struct ConversationStatsView: View {
             reconcileSelection()
         }
         .onChange(of: result.rows.map(\.id)) { _, _ in reconcileSelection() }
-    }
-
-    /// 顶栏与概览 / 项目同一组件（`StatsTopBar`）：左侧扫描状态与本地刷新，右侧粒度 + 范围分段控件；
-    /// 搜索、项目、排序在列表栏顶部的过滤行。
-    private var toolbar: some View {
-        StatsTopBar(granularity: $granularity, range: $range) {
-            HStack(spacing: 12) {
-                ConversationScanStatus(
-                    isScanning: appState.usageService.isScanning,
-                    isEmpty: appState.usageService.conversationAggregator.isEmpty,
-                    lastScanAt: appState.usageService.lastScanAt
-                )
-                .font(.system(size: 11.5))
-                .monospacedDigit()
-                .lineLimit(1)
-
-                Button {
-                    Task { await appState.usageService.scanNow() }
-                } label: {
-                    if appState.usageService.isScanning {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
-                .buttonStyle(.borderless)
-                .frame(width: 26, height: 22)
-                .help(tr("Refresh local usage", "刷新本地用量"))
-            }
-            // idealWidth 0：扫描状态文案会变，不参与顶栏是否换行的判断(见 StatsTopBar)。
-            .frame(minWidth: 0, idealWidth: 0, maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
     }
 
     /// 列表栏顶部过滤行：搜索、项目菜单、排序，外观与项目页过滤行一致。
@@ -210,16 +174,6 @@ struct ConversationStatsView: View {
         let rows = result.rows
         return VStack(spacing: 0) {
             filterRow(result)
-
-            if range == .custom {
-                HStack(spacing: 8) {
-                    DatePicker(tr("From", "起"), selection: $customFrom, displayedComponents: .date)
-                    DatePicker(tr("To", "止"), selection: $customTo, in: customFrom..., displayedComponents: .date)
-                }
-                .labelsHidden()
-                .padding(10)
-                Divider()
-            }
 
             // 空态规则同项目页：首次整理 → 范围内没有对话 → 搜索无匹配。
             if isOrganizing {
@@ -381,7 +335,7 @@ struct ConversationStatsView: View {
     }
 }
 
-private struct ConversationScanStatus: View {
+struct ConversationScanStatus: View {
     let isScanning: Bool
     let isEmpty: Bool
     let lastScanAt: Date?

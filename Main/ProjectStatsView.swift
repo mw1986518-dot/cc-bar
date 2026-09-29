@@ -119,8 +119,6 @@ struct ProjectStatsView: View {
         let output = pageOutput
         let rows = listRows(output.overview.projects)
         VStack(spacing: 0) {
-            toolbar
-            Divider()
             HSplitView {
                 projectList(rows: rows, output: output)
                     .frame(
@@ -150,27 +148,6 @@ struct ProjectStatsView: View {
         .onChange(of: rows.map(\.key)) { _, _ in reconcileSelection(rows: rows) }
     }
 
-    // MARK: Toolbar
-
-    /// 顶栏只放扫描状态和粒度 / 范围分段控件（与概览同一组件）；搜索、项目数、排序在列表栏顶部的过滤行。
-    private var toolbar: some View {
-        StatsTopBar(granularity: $granularity, range: $range) {
-            HStack(spacing: 6) {
-                if appState.usageService.isScanning, !appState.usageService.conversationAggregator.isEmpty {
-                    ProgressView().controlSize(.small)
-                    Text(tr("Scanning…", "正在扫描…"))
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            // idealWidth 0:扫描提示不参与顶栏是否换行的判断(见 StatsTopBar)。
-            .frame(minWidth: 0, idealWidth: 0, maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-    }
-
     private func filterRow(projectCount: Int) -> some View {
         HStack(spacing: 6) {
             StatsSearchField(prompt: tr("Search project name or path", "搜索项目名或路径"), text: $search)
@@ -193,16 +170,6 @@ struct ProjectStatsView: View {
     private func projectList(rows: [ProjectUsageRow], output: ProjectPageCache.Output) -> some View {
         VStack(spacing: 0) {
             filterRow(projectCount: output.overview.projects.count)
-
-            if range == .custom {
-                HStack(spacing: 8) {
-                    DatePicker(tr("From", "起"), selection: $customFrom, displayedComponents: .date)
-                    DatePicker(tr("To", "止"), selection: $customTo, in: customFrom..., displayedComponents: .date)
-                }
-                .labelsHidden()
-                .padding(10)
-                Divider()
-            }
 
             if isOrganizing {
                 organizingState

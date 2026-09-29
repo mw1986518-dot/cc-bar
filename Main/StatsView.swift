@@ -316,7 +316,7 @@ enum StatsServiceFilter: Hashable, CaseIterable {
     }
 }
 
-enum StatsViewMode: Hashable {
+enum StatsViewMode: Hashable, CaseIterable {
     case overview
     case conversations
     case projects
@@ -327,6 +327,17 @@ enum StatsViewMode: Hashable {
 /// 统计页内的跨视图跳转请求（概览 → 对话 / 项目，项目 → 对话等）。
 /// 目标视图出现或请求变化时消费并清空；`id` 保证重复点击同一目标也会生效。
 struct StatsNavigationRequest: Equatable {
+
+    /// 顶栏页面标题，与侧栏视图项同名。
+    @MainActor
+    var title: String {
+        switch self {
+        case .overview: return tr("Overview", "概览")
+        case .conversations: return tr("Conversations", "对话")
+        case .projects: return tr("Projects", "项目")
+        case .quota: return tr("Quota", "额度")
+        }
+    }
     enum Target: Equatable {
         case conversation(String)
         case conversationsByCost
@@ -365,7 +376,9 @@ struct StatsView: View {
     /// 时间线窗口视角全局统一，避免 Codex 与 Claude 默认落在不同口径。
     @State private var timelineWindow: QuotaLimitKind = .fiveHour
     @State private var pendingNavigation: StatsNavigationRequest?
-    /// 一屏高度分配的实测值（规则见 `overviewBottomRowMinHeight`）：概览顶部组、概览下排、
+    /// 概览 / 额度页的滚动画布是否已离开顶部，决定顶栏分隔线是否显示（见 `showsTopBarDivider`）。
+    @State private var canvasScrolled = false
+    /// 一屏高度分配的实测值（规则见 `overviewBottomRowMinHeight`）：概览 KPI 行、概览下排、
     /// 额度页整页内容、额度页账号面板网格、各账号面板除折线图外的高度。
     @State private var overviewTopHeight: CGFloat = 0
     @State private var overviewBottomHeight: CGFloat = 0
@@ -388,6 +401,14 @@ struct StatsView: View {
                     ConversationStatsView(
                         granularity: $granularity,
                         range: $range,
+                // 顶栏由四个视图共用、放在页面内容之外：切换视图时是同一个视图，
+                // 粒度 / 范围控件和日期选择器的位置不跳、不重建；也不随概览 / 额度页滚动。
+                topBar
+                // 始终占位、只切透明度：出现 / 消失时下方内容不上下移 1pt。
+                Divider()
+                    .opacity(showsTopBarDivider ? 1 : 0)
+                    .animation(.easeOut(duration: 0.15), value: showsTopBarDivider)
+
                         customFrom: $customFrom,
                         customTo: $customTo,
                         serviceFilter: serviceFilter,
@@ -419,17 +440,20 @@ struct StatsView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+                        .onScrolledPastTop { canvasScrolled = $0 }
         .onAppear { reconcileServiceFilter() }
         .onChange(of: SettingsStore.shared.usageServiceVisibility) { _, _ in
             reconcileServiceFilter()
         }
-        .onChange(of: viewMode) { _, _ in
+        .onChange(of: viewMode) { _, mode in
             reconcileServiceFilter()
         }
         .onChange(of: granularity) { _, _ in reconcileRange() }
         .task(id: cursorHistoryRequest) {
             guard let request = cursorHistoryRequest else { return }
             await appState.loadCursorUsageHistory(for: request.range)
+            // 离开滚动画布后清掉滚动状态，回到概览 / 额度时新画布从顶部开始。
+            if mode == .projects || mode == .conversations { canvasScrolled = false }
         }
     }
 
@@ -438,6 +462,15 @@ struct StatsView: View {
     static let wideCanvasWidth: CGFloat = 880
 
     /// 默认窗口 1440×900 下的一屏高度分配：概览下排（用量构成 + 高消耗对话）至少 390pt，
+    /// 顶栏分隔线：对话 / 项目页下方是贴边的左右分栏，一直显示，与分栏竖线相接；
+    /// 概览 / 额度页是卡片，静止时只靠间距与顶栏分开，内容滚到顶栏下方后才显示。
+    private var showsTopBarDivider: Bool {
+        switch viewMode {
+        case .conversations, .projects: return true
+        case .overview, .quota: return canvasScrolled
+        }
+    }
+
     /// 用量柱状图那一排吃掉剩余高度、260~300pt；额度页折线图吃掉剩余高度、最低 170pt。
     /// 其他区块变高（展开提供商、展开变动明细）时由这一块让出高度，降到下限后整页滚动。
     static let overviewBottomRowMinHeight: CGFloat = 390
@@ -465,14 +498,8 @@ struct StatsView: View {
         let scope = StatsOverviewScope(range: range, granularity: granularity, serviceFilter: serviceFilter)
         let contentWidth = max(0, canvasWidth - 40)
         return VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 12) {
-                topBar
-                if range == .custom { customRangeRow }
-
-                OverviewKPIRow(model: model, serviceFilter: serviceFilter)
-                    .padding(.top, 6)
-            }
-            .onHeightChange { overviewTopHeight = $0 }
+            OverviewKPIRow(model: model, serviceFilter: serviceFilter)
+                .onHeightChange { overviewTopHeight = $0 }
 
             StatsSplitRow(
                 isWide: isWide,
@@ -502,14 +529,15 @@ struct StatsView: View {
             }
             .onHeightChange { overviewBottomHeight = $0 }
         }
-        .padding(20)
+        // 顶部不留白:与顶栏的间距由顶栏下边距给出(见 topBar)。
+        .padding([.horizontal, .bottom], 20)
     }
 
-    /// 柱状图那一排 = 画布高 − 上下内边距 − 顶部组 − 下排 − 两个行间距，夹在上下限之间。
-    /// 顶部组与下排尚未测出时先按下限排，避免首帧撑出超高的一排。
+    /// 柱状图那一排 = 画布高 − 底部内边距 − KPI 行 − 下排 − 两个行间距，夹在上下限之间。
+    /// KPI 行与下排尚未测出时先按下限排，避免首帧撑出超高的一排。
     private func overviewUsageRowHeight(canvasHeight: CGFloat) -> CGFloat {
         guard overviewTopHeight > 0, overviewBottomHeight > 0 else { return Self.overviewUsageRowMinHeight }
-        let remaining = canvasHeight - 40 - overviewTopHeight - overviewBottomHeight - 12 * 2
+        let remaining = canvasHeight - 20 - overviewTopHeight - overviewBottomHeight - 12 * 2
         return min(Self.overviewUsageRowMaxHeight, max(Self.overviewUsageRowMinHeight, remaining.rounded(.down)))
     }
 
@@ -538,23 +566,6 @@ struct StatsView: View {
 
     private func quotaContent(canvasHeight: CGFloat, isWide: Bool) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            // 页头与概览顶栏同一写法：17 bold 标题 + 11pt 说明同一行，高度对齐分段控件的 24。
-            HStack(spacing: 12) {
-                Text(tr("Quota", "额度"))
-                    .font(.system(size: 17, weight: .bold))
-                    .kerning(-0.4)
-                    .lineLimit(1)
-                    .fixedSize()
-                Text(tr(
-                    "Current quota cycles and how quota changed.",
-                    "当前额度周期的用量，以及额度的变化记录。"
-                ))
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            }
-            .frame(height: 24)
-
             if quotaApps.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "gauge.with.needle")
@@ -578,7 +589,7 @@ struct StatsView: View {
             }
         }
         .onHeightChange { quotaContentHeight = $0 }
-        .padding(20)
+        .padding([.horizontal, .bottom], 20)
     }
 
     private func quotaTimelineSection(canvasHeight: CGFloat, isWide: Bool) -> some View {
@@ -623,7 +634,7 @@ struct StatsView: View {
         guard sections.count <= columns, quotaGridHeight > 0, above > 0, chrome > 0 else {
             return Self.quotaTimelineChartMinHeight
         }
-        let remaining = canvasHeight - 40 - above - chrome
+        let remaining = canvasHeight - 20 - above - chrome
         return max(Self.quotaTimelineChartMinHeight, remaining.rounded(.down))
     }
 
@@ -780,27 +791,76 @@ struct StatsView: View {
 
     // MARK: Top bar (segmented + custom)
 
-    /// 一行放不下（如最小窗口、英文）时拆成两行：第一行标题、说明、粒度，第二行范围控件铺满整行。
+    /// 四个视图共用的顶栏：标题 + 各视图的说明 / 扫描状态，右侧粒度、范围控件（额度页没有）。
     private var topBar: some View {
-        StatsTopBar(granularity: $granularity, range: $range) {
-            Text(tr("Overview", "概览"))
-                .font(.system(size: 17, weight: .bold))
-                .kerning(-0.4)
-                .lineLimit(1)
-                .fixedSize()
+        StatsTopBar(
+            mode: viewMode,
+            granularity: $granularity,
+            range: $range,
+            customFrom: $customFrom,
+            customTo: $customTo
+        ) {
+            topBarDetail
+        }
+        .padding(.horizontal, 20)
+        // 上下同为 14:概览 / 额度页不画分隔线时,顶栏到卡片的间距就是下边距 14(画布顶部不再留白),
+        // 与上方间距相等;14 大于卡片间距 12,顶栏仍自成一组。
+        .padding(.vertical, 14)
+    }
+
+    /// 标题右侧的内容。扫描提示会自行出现 / 消失，放在左侧剩余空间里靠右，
+    /// 不挤占右侧控件，也不会把控件推着平移。
+    @ViewBuilder
+    private var topBarDetail: some View {
+        switch viewMode {
+        case .overview:
             Text(overviewScopeCaption)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .lineLimit(1)
-
-            // 扫描提示由后台扫描自行出现 / 消失。它不能当成 HStack 的普通成员夹在
-            // Spacer 和两个 Picker 之间——那样每次出现都凭空插入约 170pt,把右对齐的
-            // 控件整体推着左右平移。改成让它独占左侧剩余空间并在其中右对齐:视觉上仍
-            // 紧贴控件左边,但剩余空间由它自己吃掉,控件位置只由自身宽度决定,不再被推动。
-            // idealWidth 0:不参与顶栏是否换行的判断(见 StatsTopBar)。
             StatsScanningIndicator()
-                .frame(minWidth: 0, idealWidth: 0, maxWidth: .infinity, alignment: .trailing)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        case .quota:
+            Text(tr(
+                "Current quota cycles and how quota changed.",
+                "当前额度周期的用量，以及额度的变化记录。"
+            ))
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        case .projects:
+            if appState.usageService.isScanning, !appState.usageService.conversationAggregator.isEmpty {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(tr("Scanning…", "正在扫描…"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        case .conversations:
+            ConversationScanStatus(
+                isScanning: appState.usageService.isScanning,
+                isEmpty: appState.usageService.conversationAggregator.isEmpty,
+                lastScanAt: appState.usageService.lastScanAt
+            )
+            .font(.system(size: 11.5))
+            .monospacedDigit()
+            .lineLimit(1)
+
+            Button {
+                Task { await appState.usageService.scanNow() }
+            } label: {
+                if appState.usageService.isScanning {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                }
+            }
+            .buttonStyle(.borderless)
+            .frame(width: 26, height: 22)
+            .help(tr("Refresh local usage", "刷新本地用量"))
         }
     }
 
@@ -824,18 +884,6 @@ struct StatsView: View {
     private func reconcileRange() {
         guard !granularity.ranges.contains(range) else { return }
         range = granularity.ranges.first ?? .all
-    }
-
-    private var customRangeRow: some View {
-        HStack(spacing: 12) {
-            DatePicker(tr("From", "起"), selection: $customFrom, displayedComponents: .date)
-                .datePickerStyle(.compact)
-            DatePicker(tr("To", "止"), selection: $customTo, in: customFrom..., displayedComponents: .date)
-                .datePickerStyle(.compact)
-            Spacer()
-        }
-        .font(.system(size: 12))
-        .foregroundStyle(.secondary)
     }
 
     // MARK: Timeline
@@ -2169,29 +2217,86 @@ private struct LegendChip: View {
 /// 样式见 设计风格「Segmented control」。
 // MARK: - Top bar & filter controls
 
-/// 统计页顶栏：左侧内容由页面给（概览是标题 + 口径说明，项目页是扫描状态），右侧粒度 + 范围分段控件。
-/// 一行放不下时拆成两行：第一行左侧内容 + 粒度，第二行范围控件铺满整行。
-/// 是否换行按内容实测（`ViewThatFits`），不用固定断点：英文两个分段控件合计约 880pt，
-/// 加上概览标题和说明约 1180pt，固定断点无论取多少都会让某个语言或页面要么挤、要么过早换行。
-/// 扫描提示这类会自行出现 / 消失的内容要把 idealWidth 设为 0，不参与判断，否则扫描一开始顶栏就会跳成两行。
-struct StatsTopBar<Leading: View>: View {
+private extension View {
+    /// 上报 ScrollView 是否已离开顶部。滚动几何需要 macOS 15；更早的系统无法检测，
+    /// 按已滚动处理（顶栏分隔线一直显示）。
+    @ViewBuilder
+    func onScrolledPastTop(_ action: @escaping (Bool) -> Void) -> some View {
+        if #available(macOS 15.0, *) {
+            onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y + geometry.contentInsets.top > 0
+            } action: { _, scrolled in
+                action(scrolled)
+            }
+        } else {
+            onAppear { action(true) }
+        }
+    }
+}
+
+/// 统计页顶栏，四个视图共用（`StatsView` 放在页面内容之上，切换视图时不重建）：
+/// 左侧标题 + 视图自己的说明 / 扫描状态，选中「自定义」时左侧末尾（紧挨粒度控件）出现起止日期；
+/// 右侧粒度 + 范围分段控件，额度页不显示。一行放不下时拆成两行：第一行左侧内容 + 粒度，
+/// 第二行范围控件铺满整行。
+///
+/// 是否换行用 `ViewThatFits` 按理想宽度判断。左侧的理想宽度固定取「最长的视图标题 + 起止日期」，
+/// 与当前视图、说明文案、是否选中自定义都无关：同一窗口宽度下各视图行数一致，切换视图、
+/// 选中自定义都不会让顶栏在一行 / 两行之间跳。说明文案放不下时截断。
+struct StatsTopBar<Detail: View>: View {
+    let mode: StatsViewMode
     @Binding var granularity: StatsGranularity
     @Binding var range: StatsRange
-    @ViewBuilder var leading: () -> Leading
+    @Binding var customFrom: Date
+    @Binding var customTo: Date
+    @ViewBuilder var detail: () -> Detail
+
+    private var showsRangeControls: Bool { mode != .quota }
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
-                leading()
-                granularityBar
-                StatsRangePicker(granularity: granularity, range: $range)
+                leading
+                if showsRangeControls {
+                    // 两个控件固定取理想宽度。HStack 按「剩余宽度 ÷ 剩余子视图数」逐个分配,
+                    // 左侧 maxWidth: .infinity 的内容也会分走一份,范围控件拿不到骨架宽度就被压窄,
+                    // 「自定义」缩成「自…」。能否放下已由 ViewThatFits 按理想宽度判断过。
+                    granularityBar
+                    StatsRangePicker(granularity: granularity, range: $range)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
             }
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 12) {
-                    leading()
-                    granularityBar
+                    leading
+                    if showsRangeControls { granularityBar }
                 }
-                StatsRangePicker(granularity: granularity, range: $range, fillsWidth: true)
+                if showsRangeControls {
+                    StatsRangePicker(granularity: granularity, range: $range, fillsWidth: true)
+                }
+            }
+        }
+    }
+
+    /// 左侧内容。底下叠一层隐藏的「最长标题 + 起止日期」只撑宽度：理想宽度由它决定，
+    /// 实际内容的理想宽度取 0；最小宽度也不小于它，一行布局时标题和日期不会被挤到重叠。
+    /// 最小高度 24 与分段控件同高，额度页没有控件时顶栏高度不变。
+    private var leading: some View {
+        ZStack(alignment: .leading) {
+            HStack(spacing: 12) {
+                ZStack(alignment: .leading) {
+                    ForEach(StatsViewMode.allCases, id: \.self) { titleText($0.title) }
+                }
+                customDates(from: .constant(Date()), to: .constant(Date()))
+            }
+            .hidden()
+
+            HStack(spacing: 12) {
+                titleText(mode.title)
+                detail()
+                Spacer(minLength: 0)
+                if showsRangeControls, range == .custom {
+                    customDates(from: $customFrom, to: $customTo)
+                }
             }
         }
     }
@@ -2225,13 +2330,36 @@ struct StatsRangePicker: View {
             SegmentedBar(items: StatsGranularity.day.ranges,
                          label: { tr($0.englishLabel, $0.chineseLabel) },
                          selection: .constant(StatsRange.today),
+            .frame(minWidth: 0, idealWidth: 0, maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(minHeight: 24)
+    }
+
+    private func titleText(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 17, weight: .bold))
+            .kerning(-0.4)
+            .lineLimit(1)
+            .fixedSize()
+    }
+
+    private func customDates(from: Binding<Date>, to: Binding<Date>) -> some View {
+        HStack(spacing: 6) {
+            DatePicker(tr("From", "起"), selection: from, displayedComponents: .date)
+            Text("–")
+                .foregroundStyle(.secondary)
+            DatePicker(tr("To", "止"), selection: to, in: from.wrappedValue..., displayedComponents: .date)
                          uniformSegments: true)
+        .labelsHidden()
+        .datePickerStyle(.compact)
+        .fixedSize()
                 .hidden()
                 .overlay { bar }
         }
     }
 
     private var bar: some View {
+            .fixedSize(horizontal: true, vertical: false)
         SegmentedBar(items: granularity.ranges,
                      label: { tr($0.englishLabel, $0.chineseLabel) },
                      selection: $range,
