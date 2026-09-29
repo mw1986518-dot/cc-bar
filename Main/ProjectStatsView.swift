@@ -123,9 +123,15 @@ struct ProjectStatsView: View {
             Divider()
             HSplitView {
                 projectList(rows: rows, output: output)
-                    .frame(minWidth: 360, idealWidth: 400, maxWidth: 520, maxHeight: .infinity, alignment: .top)
+                    .frame(
+                        minWidth: StatsSplitMetrics.listMinWidth,
+                        idealWidth: StatsSplitMetrics.listWidth,
+                        maxWidth: StatsSplitMetrics.listWidth,
+                        maxHeight: .infinity,
+                        alignment: .top
+                    )
                 detailPane(rows: rows, output: output)
-                    .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .frame(minWidth: StatsSplitMetrics.detailMinWidth, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .layoutPriority(1)
@@ -239,68 +245,24 @@ struct ProjectStatsView: View {
     }
 
     private var organizingState: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text(tr("Organizing conversation history…", "正在整理历史对话"))
-                    .font(.system(size: 12.5, weight: .medium))
-            }
-            if let progress = appState.usageService.scanProgress {
-                if progress.filesTotal > 0 {
-                    ProgressView(value: Double(progress.filesCompleted), total: Double(max(1, progress.filesTotal)))
-                }
-                Text(tr(
-                    "\(progress.filesCompleted) session files processed",
-                    "已处理 \(progress.filesCompleted) 个会话文件"
-                ))
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-            } else {
-                ProgressView().progressViewStyle(.linear)
-            }
-            ForEach(0..<6, id: \.self) { _ in
-                VStack(alignment: .leading, spacing: 5) {
-                    RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.14)).frame(width: 160, height: 10)
-                    RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.1)).frame(height: 8)
-                }
-                .padding(.vertical, 6)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        StatsOrganizingState(progress: appState.usageService.scanProgress)
     }
 
     private var emptyState: some View {
-        VStack(spacing: 10) {
-            Spacer()
-            Image(systemName: "folder")
-                .font(.system(size: 28))
-                .foregroundStyle(.tertiary)
-            Text(range == .today
-                 ? tr("No project usage today", "今天还没有项目用量")
-                 : tr("No project usage in this range", "该范围内没有项目用量"))
-                .font(.system(size: 13, weight: .medium))
-            Text(tr(
+        StatsListEmptyState(
+            systemImage: "folder",
+            title: range == .today
+                ? tr("No project usage today", "今天还没有项目用量")
+                : tr("No project usage in this range", "该范围内没有项目用量"),
+            message: tr(
                 "Project usage comes from local Claude Code, Codex, Pi, OpenCode and DSH conversation logs.",
                 "项目用量来自本机 Claude Code、Codex、Pi、OpenCode、DSH 的对话日志。"
-            ))
-            .font(.system(size: 11))
-            .foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: 280)
-            if range != .last30, range != .all {
-                Button(tr("View last 30 days", "查看近 30 天")) {
-                    granularity = .day
-                    range = .last30
-                }
-                .controlSize(.small)
-            }
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(16)
+            ),
+            showLast30Days: range != .last30 && range != .all ? {
+                granularity = .day
+                range = .last30
+            } : nil
+        )
     }
 
     // MARK: Detail
@@ -615,32 +577,29 @@ private struct ProjectDetailView: View {
     let granularity: StatsGranularity
     let navigate: (StatsNavigationRequest.Target) -> Void
 
-    /// 详情区宽度达到该值时两列并排。默认窗口（1440 宽、列表 400pt）下详情区约 840pt，
-    /// 沿用概览的 880pt 会退成单列。
-    private static let wideDetailWidth: CGFloat = 760
-    /// 用量图那一排的最低高度；画布更高时吃掉剩余高度，规则同概览（见 `StatsView.overviewBottomRowMinHeight`）。
-    private static let chartRowMinHeight: CGFloat = 206
-
-    @State private var topHeight: CGFloat = 0
-    @State private var bottomHeight: CGFloat = 0
+    /// 卡片高度只由固定行数决定、不随项目内容变化，切换项目时各卡片不跳：
+    /// 用量图那一排固定 250（设计稿）；工具与模型最多 5 行；分支预留 5 行、高消耗对话预留 3 行，
+    /// 内容少时卡片下方留白。「仓库与 worktree」在最下方按内容显示，只影响页面长度。
+    private static let chartRowHeight: CGFloat = 250
+    private static let modelSlots = 5
+    private static let branchSlots = 5
+    private static let topConversationSlots = 3
 
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
-                let isWide = proxy.size.width >= Self.wideDetailWidth
+                // 沿用概览的 880pt 会让默认窗口退成单列，用两页共用的阈值。
+                let isWide = proxy.size.width >= StatsSplitMetrics.wideDetailWidth
                 let width = max(0, proxy.size.width - 40)
                 VStack(alignment: .leading, spacing: 14) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        header
-                        kpis
-                        allTimeLine
-                    }
-                    .onHeightChange { topHeight = $0 }
+                    header
+                    kpis
+                    allTimeLine
                     StatsSplitRow(
                         isWide: isWide,
                         width: width,
                         leadingFraction: 0.58,
-                        minHeight: isWide ? chartRowHeight(canvasHeight: proxy.size.height) : nil
+                        minHeight: isWide ? Self.chartRowHeight : nil
                     ) {
                         DetailSection(title: tr(granularity.panelTitleEnglish, granularity.panelTitleChinese), fillHeight: isWide) {
                             ProjectDailyChart(dailyByApp: detail.dailyByApp, granularity: granularity)
@@ -650,40 +609,30 @@ private struct ProjectDetailView: View {
                             toolsAndModels
                         }
                     }
-                    VStack(alignment: .leading, spacing: 14) {
-                        StatsSplitRow(isWide: isWide, width: width, leadingFraction: 0.5) {
-                            DetailSection(title: tr("Branches", "分支"), fillHeight: isWide) {
-                                branchTable
-                            }
-                        } trailing: {
-                            DetailSection(
-                                title: tr("Top conversations", "高消耗对话"),
-                                right: AnyView(StatsLinkButton(title: tr("View in Conversations ›", "在对话页查看 ›")) {
-                                    navigate(.conversationsInProject(detail.project.key))
-                                }),
-                                fillHeight: isWide
-                            ) {
-                                topConversations
-                            }
+                    StatsSplitRow(isWide: isWide, width: width, leadingFraction: 0.5) {
+                        DetailSection(title: tr("Branches", "分支"), fillHeight: isWide) {
+                            branchTable
                         }
-                        if !detail.worktrees.isEmpty {
-                            DetailSection(title: tr("Repository & worktrees", "仓库与 worktree")) {
-                                worktreeTable
-                            }
+                    } trailing: {
+                        DetailSection(
+                            title: tr("Top conversations", "高消耗对话"),
+                            right: AnyView(StatsLinkButton(title: tr("View in Conversations ›", "在对话页查看 ›")) {
+                                navigate(.conversationsInProject(detail.project.key))
+                            }),
+                            fillHeight: isWide
+                        ) {
+                            topConversations
                         }
                     }
-                    .onHeightChange { bottomHeight = $0 }
+                    if !detail.worktrees.isEmpty {
+                        DetailSection(title: tr("Repository & worktrees", "仓库与 worktree")) {
+                            worktreeTable
+                        }
+                    }
                 }
                 .padding(20)
             }
         }
-    }
-
-    /// 用量图那一排 = 画布高 − 上下内边距 − 上方组 − 下方组 − 两个行间距，不低于下限。
-    private func chartRowHeight(canvasHeight: CGFloat) -> CGFloat {
-        guard topHeight > 0, bottomHeight > 0 else { return Self.chartRowMinHeight }
-        let remaining = canvasHeight - 40 - topHeight - bottomHeight - 14 * 2
-        return max(Self.chartRowMinHeight, remaining.rounded(.down))
     }
 
     private var header: some View {
@@ -781,8 +730,10 @@ private struct ProjectDetailView: View {
             guard detail.totals.totalTokens > 0 else { return 0 }
             return Double(totals.totalTokens) / Double(detail.totals.totalTokens)
         }
-        let models = Array(detail.models.prefix(6))
-        let restModels = detail.models.dropFirst(6)
+        // 最多 5 行：超过 5 个模型时列前 4 个，第 5 行为「其余 N 个模型」。
+        let limit = detail.models.count > Self.modelSlots ? Self.modelSlots - 1 : Self.modelSlots
+        let models = Array(detail.models.prefix(limit))
+        let restModels = detail.models.dropFirst(limit)
         return VStack(alignment: .leading, spacing: 10) {
             CompositionShareBar(segments: apps.map {
                 CompositionShareBar.Segment(id: $0.rawValue, role: .service($0), share: share(detail.totalsByApp[$0] ?? .zero))
@@ -838,9 +789,11 @@ private struct ProjectDetailView: View {
         }
     }
 
+    /// 最多 5 行：超过 5 个分支时列前 4 个，第 5 行为「另有 N 个分支」；按 5 行预留高度。
     private var branchTable: some View {
-        let rows = Array(detail.branches.prefix(8))
-        let rest = detail.branches.dropFirst(8)
+        let limit = detail.branches.count > Self.branchSlots ? Self.branchSlots - 1 : Self.branchSlots
+        let rows = Array(detail.branches.prefix(limit))
+        let rest = detail.branches.dropFirst(limit)
         return VStack(spacing: 0) {
             HStack {
                 tableHeader(tr("Branch", "分支"), alignment: .leading).frame(maxWidth: .infinity, alignment: .leading)
@@ -880,10 +833,22 @@ private struct ProjectDetailView: View {
                     .padding(.vertical, 8)
             }
         }
+        .reservingHeight {
+            VStack(spacing: 0) {
+                tableHeader(" ", alignment: .leading)
+                    .padding(.bottom, 6)
+                ForEach(0..<Self.branchSlots, id: \.self) { _ in
+                    Divider()
+                    cell(" ", width: 52)
+                        .padding(.vertical, 5)
+                }
+            }
+        }
     }
 
+    /// 按 3 行预留高度；占位行与 `TopConversationRowView` 紧凑版同高（两行文字 + 上下 6）。
     private var topConversations: some View {
-        let rows = Array(detail.topConversations.prefix(3))
+        let rows = Array(detail.topConversations.prefix(Self.topConversationSlots))
         return VStack(spacing: 0) {
             ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
                 if index > 0 { Divider() }
@@ -907,6 +872,18 @@ private struct ProjectDetailView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 8)
+            }
+        }
+        .reservingHeight {
+            VStack(spacing: 0) {
+                ForEach(0..<Self.topConversationSlots, id: \.self) { index in
+                    if index > 0 { Divider() }
+                    VStack(spacing: 2) {
+                        Text(" ").font(.system(size: 12.5, weight: .medium))
+                        Text(" ").font(.system(size: 10.5))
+                    }
+                    .padding(.vertical, 6)
+                }
             }
         }
     }
@@ -1286,6 +1263,18 @@ enum StatsRelativeDay {
         case 1: return tr("yesterday", "昨天")
         case 2..<30: return tr("\(days)d ago", "\(days) 天前")
         default: return StatsFormatter.day(date)
+        }
+    }
+}
+
+private extension View {
+    /// 按占位内容预留高度：实际内容更少时下方留白，切换项目时卡片高度不变。
+    func reservingHeight<Placeholder: View>(@ViewBuilder _ placeholder: () -> Placeholder) -> some View {
+        ZStack(alignment: .top) {
+            placeholder()
+                .frame(maxWidth: .infinity)
+                .hidden()
+            self
         }
     }
 }

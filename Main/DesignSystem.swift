@@ -647,3 +647,85 @@ extension StatsSelectionList where Trailing == EmptyView {
         self.init(items: items, selection: selection, row: row, trailing: { EmptyView() })
     }
 }
+
+/// 对话 / 项目两个主从页共用的分栏尺寸，两页切换时分隔线不跳。
+/// 最小窗口 1040 宽时：1040 − 侧栏 200 − 列表 360 = 详情 480。
+enum StatsSplitMetrics {
+    static let listMinWidth: CGFloat = 360
+    /// 列表默认宽，也是上限：多出的宽度都给详情。
+    static let listWidth: CGFloat = 400
+    static let detailMinWidth: CGFloat = 480
+    /// 详情区宽度达到该值时面板两列并排。默认窗口（1440 宽）下详情区约 840pt。
+    static let wideDetailWidth: CGFloat = 760
+}
+
+/// 列表栏首次整理（聚合器为空且正在扫描）：进度 + 骨架行。
+struct StatsOrganizingState: View {
+    let progress: ScanProgress?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(tr("Organizing conversation history…", "正在整理历史对话"))
+                    .font(.system(size: 12.5, weight: .medium))
+            }
+            if let progress {
+                if progress.filesTotal > 0 {
+                    ProgressView(value: Double(progress.filesCompleted), total: Double(max(1, progress.filesTotal)))
+                }
+                Text(tr(
+                    "\(progress.filesCompleted) session files processed",
+                    "已处理 \(progress.filesCompleted) 个会话文件"
+                ))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            } else {
+                ProgressView().progressViewStyle(.linear)
+            }
+            ForEach(0..<6, id: \.self) { _ in
+                VStack(alignment: .leading, spacing: 5) {
+                    RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.14)).frame(width: 160, height: 10)
+                    RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.1)).frame(height: 8)
+                }
+                .padding(.vertical, 6)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+/// 列表栏空状态（所选范围内没有数据）：图标 + 标题 + 说明，可选「查看近 30 天」。
+struct StatsListEmptyState: View {
+    let systemImage: String
+    let title: String
+    let message: String
+    /// 为 nil 时不显示「查看近 30 天」（当前已是近 30 天或全部时间）。
+    var showLast30Days: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Spacer()
+            Image(systemName: systemImage)
+                .font(.system(size: 28))
+                .foregroundStyle(.tertiary)
+            Text(title)
+                .font(.system(size: 13, weight: .medium))
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 280)
+            if let showLast30Days {
+                Button(tr("View last 30 days", "查看近 30 天"), action: showLast30Days)
+                    .controlSize(.small)
+            }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(16)
+    }
+}

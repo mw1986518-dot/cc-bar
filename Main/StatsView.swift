@@ -1382,7 +1382,7 @@ private struct OverviewTokenBreakdownPanel: View {
             Text(StatsFormatter.compactToken(tokens))
                 .font(.system(size: 12.5, weight: .semibold))
                 .monospacedDigit()
-            Text(Self.sharePercent(denominator > 0 ? Double(tokens) / Double(denominator) : 0))
+            Text(StatsFormatter.sharePercent(denominator > 0 ? Double(tokens) / Double(denominator) : 0))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
@@ -1421,13 +1421,6 @@ private struct OverviewTokenBreakdownPanel: View {
     /// 命中率保留一位小数（如 `72.1%`）。
     private static func hitRatePercent(_ rate: Double) -> String {
         String(format: "%.1f%%", max(0, min(1, rate)) * 100)
-    }
-
-    /// 分项占比保留一位小数；非零但不足 0.1% 显示 `<0.1%`。
-    private static func sharePercent(_ ratio: Double) -> String {
-        guard ratio.isFinite, ratio > 0 else { return "0%" }
-        let value = ratio * 100
-        return value < 0.1 ? "<0.1%" : String(format: "%.1f%%", min(100, value))
     }
 }
 
@@ -2536,81 +2529,18 @@ struct KPICard: View {
 
 // MARK: - Token breakdown
 
-private func hitRateText(_ rate: Double) -> String {
+func hitRateText(_ rate: Double) -> String {
     "\(Int((max(0, min(1, rate)) * 100).rounded()))%"
 }
 
-private enum TokenCategoryStyle {
+enum TokenCategoryStyle {
     static let input = 0.85
     static let output = 0.6
     static let cacheRead = 0.4
 }
 
-/// KPI 行下方的 Token 拆分面板内容:总量 + 命中率 + 迷你堆叠条 + 输入/输出/缓存命中三项。
-/// 缓存写入(创建)不展示——量级小、Codex 协议也不上报,详见与用户的讨论。
-struct TokenBreakdownView: View {
-    let totals: UsageTotals
-
-    var body: some View {
-        // 对话明细用的 hero 版：大数字 + 横排 3 列。概览的 Token 拆分另有逐行版式（`OverviewTokenBreakdownPanel`）。
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(tr("Total tokens", "总 Tokens"))
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                    Text(StatsFormatter.compactToken(totals.totalTokens))
-                        .font(.system(size: 20, weight: .semibold))
-                        .monospacedDigit()
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(tr("Cache hit rate", "缓存命中率"))
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                    Text(hitRateText(totals.cacheHitRate))
-                        .font(.system(size: 20, weight: .semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(Color.green)
-                }
-            }
-
-            TokenStackBar(totals: totals)
-
-            HStack(spacing: 0) {
-                stat(tr("Input", "输入"), StatsFormatter.compactToken(totals.inputTokens), dot: TokenCategoryStyle.input)
-                stat(tr("Output", "输出"), StatsFormatter.compactToken(totals.outputTokens), dot: TokenCategoryStyle.output)
-                stat(tr("Cache hit", "缓存命中"), StatsFormatter.compactToken(totals.cacheReadTokens), dot: TokenCategoryStyle.cacheRead)
-            }
-        }
-    }
-
-    private func stat(
-        _ label: String,
-        _ value: String,
-        dot: Double? = nil,
-        valueColor: Color = .primary
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(dot.map { Color.primary.opacity($0) } ?? Color.clear)
-                    .frame(width: 6, height: 6)
-                Text(label)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-            }
-            Text(value)
-                .font(.system(size: 12.5, weight: .semibold))
-                .monospacedDigit()
-                .foregroundStyle(valueColor)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
 /// 输入 / 输出 / 缓存命中 三段迷你堆叠条,风格延续 `ProgressBar`(Capsule + 灰底轨道)。
-private struct TokenStackBar: View {
+struct TokenStackBar: View {
     let totals: UsageTotals
     var height: CGFloat = 8
 
@@ -3263,6 +3193,13 @@ enum StatsFormatter {
 
     static func token(_ value: Int) -> String {
         tokenFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+
+    /// 分项占比保留一位小数；非零但不足 0.1% 显示 `<0.1%`。
+    static func sharePercent(_ ratio: Double) -> String {
+        guard ratio.isFinite, ratio > 0 else { return "0%" }
+        let value = ratio * 100
+        return value < 0.1 ? "<0.1%" : String(format: "%.1f%%", min(100, value))
     }
 
     /// 紧凑显示。中文用 万 / 亿,英文用 k / M / B。

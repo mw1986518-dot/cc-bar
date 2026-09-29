@@ -31,13 +31,20 @@ struct ConversationStatsView: View {
     var body: some View {
         let result = queryResult
         VStack(spacing: 0) {
-            toolbar(result)
+            toolbar
             Divider()
             HSplitView {
-                conversationList(rows: result.rows)
-                    .frame(minWidth: 390, idealWidth: 460, maxHeight: .infinity, alignment: .top)
-                detailPane
-                    .frame(minWidth: 390, idealWidth: 520, maxHeight: .infinity, alignment: .top)
+                // 分栏尺寸与项目页共用（`StatsSplitMetrics`），切换视图时分隔线不跳。
+                conversationList(result)
+                    .frame(
+                        minWidth: StatsSplitMetrics.listMinWidth,
+                        idealWidth: StatsSplitMetrics.listWidth,
+                        maxWidth: StatsSplitMetrics.listWidth,
+                        maxHeight: .infinity,
+                        alignment: .top
+                    )
+                detailPane(result)
+                    .frame(minWidth: StatsSplitMetrics.detailMinWidth, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .layoutPriority(1)
@@ -48,7 +55,10 @@ struct ConversationStatsView: View {
                 await appState.usageService.scanNow()
             }
         }
-        .onAppear { applyNavigation() }
+        .onAppear {
+            applyNavigation()
+            reconcileSelection()
+        }
         .onChange(of: navigation) { _, _ in applyNavigation() }
         .onChange(of: serviceFilter) { _, _ in reconcileScope() }
         .onChange(of: range) { _, _ in reconcileScope() }
@@ -57,62 +67,52 @@ struct ConversationStatsView: View {
             if let projectKey, !keys.contains(projectKey) { self.projectKey = nil }
             reconcileSelection()
         }
+        .onChange(of: result.rows.map(\.id)) { _, _ in reconcileSelection() }
     }
 
-    private func toolbar(_ result: ConversationQueryResult) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField(tr("Search title or project", "搜索标题或项目"), text: $search)
-                .textFieldStyle(.roundedBorder)
-                .frame(minWidth: 180, maxWidth: 280)
+    /// 顶栏与概览 / 项目同一组件（`StatsTopBar`）：左侧扫描状态与本地刷新，右侧粒度 + 范围分段控件；
+    /// 搜索、项目、排序在列表栏顶部的过滤行。
+    private var toolbar: some View {
+        StatsTopBar(granularity: $granularity, range: $range) {
+            HStack(spacing: 12) {
+                ConversationScanStatus(
+                    isScanning: appState.usageService.isScanning,
+                    isEmpty: appState.usageService.conversationAggregator.isEmpty,
+                    lastScanAt: appState.usageService.lastScanAt
+                )
+                .font(.system(size: 11.5))
+                .monospacedDigit()
+                .lineLimit(1)
 
-            projectMenu(result)
-
-            Picker("", selection: $sort) {
-                ForEach(ConversationQuerySort.allCases) { item in Text(item.label).tag(item) }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .fixedSize()
-
-            Spacer()
-
-            ConversationScanStatus(
-                isScanning: appState.usageService.isScanning,
-                isEmpty: appState.usageService.conversationAggregator.isEmpty,
-                lastScanAt: appState.usageService.lastScanAt
-            )
-
-            Button {
-                Task { await appState.usageService.scanNow() }
-            } label: {
-                if appState.usageService.isScanning {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "arrow.clockwise")
+                Button {
+                    Task { await appState.usageService.scanNow() }
+                } label: {
+                    if appState.usageService.isScanning {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
                 }
+                .buttonStyle(.borderless)
+                .frame(width: 26, height: 22)
+                .help(tr("Refresh local usage", "刷新本地用量"))
             }
-            .buttonStyle(.borderless)
-            .help(tr("Refresh local usage", "刷新本地用量"))
-
-            Picker("", selection: $granularity) {
-                ForEach(StatsGranularity.allCases, id: \.self) { item in
-                    Text(tr(item.englishLabel, item.chineseLabel)).tag(item)
-                }
-            }
-            .pickerStyle(.menu)
-            .fixedSize()
-
-            Picker("", selection: $range) {
-                ForEach(granularity.ranges, id: \.self) { item in
-                    Text(tr(item.englishLabel, item.chineseLabel)).tag(item)
-                }
-            }
-            .pickerStyle(.menu)
-            .fixedSize()
+            // idealWidth 0：扫描状态文案会变，不参与顶栏是否换行的判断(见 StatsTopBar)。
+            .frame(minWidth: 0, idealWidth: 0, maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    /// 列表栏顶部过滤行：搜索、项目菜单、排序，外观与项目页过滤行一致。
+    private func filterRow(_ result: ConversationQueryResult) -> some View {
+        HStack(spacing: 6) {
+            StatsSearchField(prompt: tr("Search title or project", "搜索标题或项目"), text: $search)
+            projectMenu(result)
+            StatsFilterMenu(items: ConversationQuerySort.allCases, label: { $0.label }, selection: $sort)
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 10)
     }
 
     private func projectMenu(_ result: ConversationQueryResult) -> some View {
@@ -161,12 +161,27 @@ struct ConversationStatsView: View {
                 Section { projectButton(option, duplicateNames: result.duplicateProjectNames) }
             }
         } label: {
-            Label(selectedProjectLabel(result), systemImage: "folder")
-                .lineLimit(1)
-                .frame(width: 150, alignment: .leading)
+            HStack(spacing: 5) {
+                Image(systemName: "folder")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text(selectedProjectLabel(result))
+                    .font(.system(size: 11.5))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 6)
+            .frame(height: 24)
+            .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .pointingHandCursor()
         .help(selectedProjectHelp(result))
+        .modifier(CappedWidth(maxWidth: 150))
     }
 
     private func projectButton(_ option: ConversationProjectOption, duplicateNames: Set<String>) -> some View {
@@ -191,8 +206,11 @@ struct ConversationStatsView: View {
         }
     }
 
-    private func conversationList(rows: [ConversationSummary]) -> some View {
-        VStack(spacing: 0) {
+    private func conversationList(_ result: ConversationQueryResult) -> some View {
+        let rows = result.rows
+        return VStack(spacing: 0) {
+            filterRow(result)
+
             if range == .custom {
                 HStack(spacing: 8) {
                     DatePicker(tr("From", "起"), selection: $customFrom, displayedComponents: .date)
@@ -203,11 +221,29 @@ struct ConversationStatsView: View {
                 Divider()
             }
 
-            if rows.isEmpty {
-                ContentUnavailableView(
-                    tr("No conversations", "暂无对话"),
+            // 空态规则同项目页：首次整理 → 范围内没有对话 → 搜索无匹配。
+            if isOrganizing {
+                StatsOrganizingState(progress: appState.usageService.scanProgress)
+            } else if rows.isEmpty, search.isEmpty {
+                StatsListEmptyState(
                     systemImage: "bubble.left.and.bubble.right",
-                    description: Text(tr("Try another time range or refresh local usage.", "请切换时间范围或刷新本地用量。"))
+                    title: range == .today
+                        ? tr("No conversations today", "今天还没有对话")
+                        : tr("No conversations in this range", "该范围内没有对话"),
+                    message: tr(
+                        "Conversations come from local Claude Code, Codex, Pi, OpenCode and DSH logs.",
+                        "对话来自本机 Claude Code、Codex、Pi、OpenCode、DSH 的日志。"
+                    ),
+                    showLast30Days: range != .last30 && range != .all ? {
+                        granularity = .day
+                        range = .last30
+                    } : nil
+                )
+            } else if rows.isEmpty {
+                ContentUnavailableView(
+                    tr("No matching conversations", "没有匹配的对话"),
+                    systemImage: "magnifyingglass",
+                    description: Text(tr("Try another keyword.", "请换一个关键词。"))
                 )
             } else {
                 StatsSelectionList(items: Array(rows.prefix(visibleLimit)), selection: $selection) { row in
@@ -225,17 +261,23 @@ struct ConversationStatsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
+    private var isOrganizing: Bool {
+        appState.usageService.conversationAggregator.isEmpty && appState.usageService.isScanning
+    }
+
     @ViewBuilder
-    private var detailPane: some View {
+    private func detailPane(_ result: ConversationQueryResult) -> some View {
         if let selection,
            let detail = appState.usageService.conversationAggregator.detail(key: selection) {
             ConversationDetailView(detail: detail)
         } else {
-            ContentUnavailableView(
-                tr("Select a conversation", "请选择对话"),
-                systemImage: "sidebar.right",
-                description: Text(tr("Token and estimated cost details appear here.", "这里会显示 Token 与估算费用明细。"))
-            )
+            // 与项目页一致：列表有内容时默认选中第一条，这里只在列表为空时出现。
+            Text(result.rows.isEmpty
+                 ? tr("No conversations in this range.", "该范围内没有对话。")
+                 : tr("Select a conversation to see details.", "请选择对话查看详情。"))
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -331,9 +373,11 @@ struct ConversationStatsView: View {
         reconcileSelection()
     }
 
+    /// 没有选中、或选中项已不在列表里时，默认选中列表第一条；列表为空时清空选中。
     private func reconcileSelection() {
-        guard let selection else { return }
-        if !queryResult.rows.contains(where: { $0.id == selection }) { self.selection = nil }
+        let rows = queryResult.rows
+        if let selection, rows.contains(where: { $0.id == selection }) { return }
+        selection = rows.first?.id
     }
 }
 
@@ -378,11 +422,16 @@ private struct ConversationListRow: View {
                     .lineLimit(1)
                 Spacer()
                 Text("\(StatsFormatter.day(summary.rangeLastAt)) \(StatsFormatter.time(summary.rangeLastAt))")
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 10.5))
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                    .fixedSize()
             }
             HStack(spacing: 6) {
+                // 项目名完整显示，放不下时只截断模型列表（设计稿同）。
                 Text(projectLabel)
+                    .lineLimit(1)
+                    .fixedSize()
                     .help(projectHelp)
                 Text("·")
                 Text(summary.models.joined(separator: ", ")).lineLimit(1)
@@ -390,14 +439,17 @@ private struct ConversationListRow: View {
             }
             .font(.system(size: 10.5))
             .foregroundStyle(.secondary)
-            HStack {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(tr("\(summary.totals.requestCount) requests", "\(summary.totals.requestCount) 次请求"))
                 Spacer()
                 Text("\(StatsFormatter.compactToken(summary.totals.totalTokens)) Tokens")
                 Text(costLabel(summary.costs))
-                    .fontWeight(.semibold)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.primary)
             }
-            .font(.system(size: 10.5, design: .monospaced))
+            .lineLimit(1)
+            .font(.system(size: 10.5))
+            .monospacedDigit()
             .foregroundStyle(.secondary)
         }
     }
@@ -424,30 +476,41 @@ private struct ConversationDetailView: View {
     let detail: ConversationDetail
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                header
-                TokenBreakdownView(totals: detail.totals)
-                    .padding(14)
-                    .ccPanel(cornerRadius: 10)
-                tokenDetails
-                speedDetails
-                costDetails
-                modelDetails
+        GeometryReader { proxy in
+            ScrollView {
+                let isWide = proxy.size.width >= StatsSplitMetrics.wideDetailWidth
+                let width = max(0, proxy.size.width - 40)
+                VStack(alignment: .leading, spacing: 14) {
+                    header
+                    kpis
+                    StatsSplitRow(isWide: isWide, width: width, leadingFraction: 0.5) {
+                        tokenComposition(fillHeight: isWide)
+                    } trailing: {
+                        costDetails(fillHeight: isWide)
+                    }
+                    StatsSplitRow(isWide: isWide, width: width, leadingFraction: 0.58) {
+                        modelDetails(fillHeight: isWide)
+                    } trailing: {
+                        speedDetails(fillHeight: isWide)
+                    }
+                }
+                .padding(20)
             }
-            .padding(16)
         }
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
                 ServiceTile(app: detail.info.app, size: 14)
                 Text(detail.info.app.displayName)
                     .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
                 Text(tr("All time", "全部时间"))
-                    .font(.system(size: 10, weight: .medium))
-                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1.5)
                     .background(Color.secondary.opacity(0.12), in: Capsule())
                     .help(tr(
                         "This detail always shows the conversation's full history, regardless of the time range filter above.",
@@ -458,106 +521,282 @@ private struct ConversationDetailView: View {
             }
             Text(detail.info.title ?? tr("Untitled", "（无标题）"))
                 .font(.system(size: 18, weight: .semibold))
-            metadataRow(tr("Conversation ID", "对话 ID"), detail.info.conversationID, copyable: true)
-            metadataRow(tr("Project", "项目"), projectText)
-            if let branch = detail.info.gitBranch, !branch.isEmpty { metadataRow(tr("Branch", "分支"), branch) }
-            metadataRow(
-                tr("Time", "时间"),
-                "\(StatsFormatter.day(detail.info.firstAt)) \(StatsFormatter.time(detail.info.firstAt)) – \(StatsFormatter.day(detail.info.lastAt)) \(StatsFormatter.time(detail.info.lastAt))"
+                .lineLimit(2)
+                .textSelection(.enabled)
+            Text(projectText)
+                .font(.system(size: 11, design: detail.info.projectStatus.isPathBased ? .monospaced : .default))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .help(projectText)
+            // 一行放不下时对话 ID 换到第二行。
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    timeItems
+                    conversationIDItem
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 12) { timeItems }
+                    conversationIDItem
+                }
+            }
+            .font(.system(size: 11))
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var timeItems: some View {
+        if let branch = detail.info.gitBranch, !branch.isEmpty {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.branch")
+                Text(branch)
+                    .font(.system(size: 11, design: .monospaced))
+                    .lineLimit(1)
+            }
+        }
+        HStack(spacing: 4) {
+            Image(systemName: "clock")
+            Text("\(StatsFormatter.day(detail.info.firstAt)) \(StatsFormatter.time(detail.info.firstAt)) – \(StatsFormatter.day(detail.info.lastAt)) \(StatsFormatter.time(detail.info.lastAt)) · \(durationText)")
+                .lineLimit(1)
+        }
+        if detail.info.includesSubtasks {
+            Text(tr("Includes subtask usage", "包含子任务用量"))
+                .lineLimit(1)
+        }
+    }
+
+    private var conversationIDItem: some View {
+        HStack(spacing: 4) {
+            Text(tr("Conversation ID", "对话 ID"))
+            Text(detail.info.conversationID)
+                .font(.system(size: 11, design: .monospaced))
+                .lineLimit(1)
+                .textSelection(.enabled)
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(detail.info.conversationID, forType: .string)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 10))
+            }
+            .buttonStyle(.borderless)
+            .help(tr("Copy conversation ID", "复制对话 ID"))
+        }
+    }
+
+    private var kpis: some View {
+        HStack(spacing: 12) {
+            KPICard(
+                english: "Total tokens",
+                chinese: "总 Tokens",
+                value: StatsFormatter.compactToken(detail.totals.totalTokens),
+                delta: nil,
+                app: nil,
+                dimmed: false
             )
-            metadataRow(tr("Duration", "持续时间"), durationText)
-            if detail.info.includesSubtasks {
-                Label(tr("Includes subtask usage", "包含子任务用量"), systemImage: "arrow.triangle.branch")
-                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+            KPICard(
+                english: "Estimated cost",
+                chinese: "估算费用",
+                value: costLabel(detail.costs),
+                delta: nil,
+                app: nil,
+                dimmed: false
+            )
+            KPICard(
+                english: "Requests",
+                chinese: "请求数",
+                value: StatsFormatter.token(detail.totals.requestCount),
+                delta: nil,
+                app: nil,
+                dimmed: false
+            )
+            KPICard(
+                english: "Cache hit rate",
+                chinese: "缓存命中率",
+                value: hitRateText(detail.totals.cacheHitRate),
+                delta: nil,
+                app: nil,
+                dimmed: false
+            )
+        }
+    }
+
+    /// 堆叠条与占比的分母都是 输入 + 输出 + 缓存读取（与概览 Token 拆分一致）；
+    /// 缓存写入只列数值，不画圆点、不算占比。
+    private func tokenComposition(fillHeight: Bool) -> some View {
+        let totals = detail.totals
+        let denominator = totals.inputTokens + totals.outputTokens + totals.cacheReadTokens
+        func share(_ tokens: Int) -> String {
+            StatsFormatter.sharePercent(denominator > 0 ? Double(tokens) / Double(denominator) : 0)
+        }
+        return DetailPanel(title: tr("Token composition", "Token 构成"), fillHeight: fillHeight) {
+            VStack(spacing: 10) {
+                TokenStackBar(totals: totals)
+                VStack(spacing: 0) {
+                    DetailValueRow(
+                        label: tr("Input", "输入"),
+                        value: StatsFormatter.compactToken(totals.inputTokens),
+                        token: (TokenCategoryStyle.input, share(totals.inputTokens))
+                    )
+                    Divider()
+                    DetailValueRow(
+                        label: tr("Output", "输出"),
+                        value: StatsFormatter.compactToken(totals.outputTokens),
+                        token: (TokenCategoryStyle.output, share(totals.outputTokens))
+                    )
+                    Divider()
+                    DetailValueRow(
+                        label: tr("Cache read", "缓存读取"),
+                        value: StatsFormatter.compactToken(totals.cacheReadTokens),
+                        token: (TokenCategoryStyle.cacheRead, share(totals.cacheReadTokens))
+                    )
+                    Divider()
+                    DetailValueRow(
+                        label: tr("Cache write", "缓存写入"),
+                        value: cacheCreationText,
+                        token: (0, "")
+                    )
+                }
             }
         }
     }
 
-    private var tokenDetails: some View {
-        DetailPanel(title: tr("Token details", "Token 明细")) {
-            DetailGrid(items: [
-                (tr("Input", "输入"), StatsFormatter.compactToken(detail.totals.inputTokens)),
-                (tr("Output", "输出"), StatsFormatter.compactToken(detail.totals.outputTokens)),
-                (tr("Cache read", "缓存读取"), StatsFormatter.compactToken(detail.totals.cacheReadTokens)),
-                (tr("Cache write", "缓存写入"), cacheCreationText),
-                (tr("Requests", "请求数"), StatsFormatter.token(detail.totals.requestCount)),
-                (tr("Estimated cost", "估算费用"), costLabel(detail.costs))
-            ])
-        }
-    }
-
-    private var costDetails: some View {
-        DetailPanel(title: tr("Estimated cost breakdown", "估算费用构成")) {
-            DetailGrid(items: [
-                (tr("Standard cost", "Standard 费用"), StatsFormatter.tierCost(
+    /// 先列 Standard / Fast，再列按最终档位价格汇总的四项；合计已在 KPI 卡，不再重复。
+    private func costDetails(fillHeight: Bool) -> some View {
+        DetailPanel(title: tr("Estimated cost breakdown", "估算费用构成"), fillHeight: fillHeight) {
+            VStack(spacing: 0) {
+                DetailValueRow(label: "Standard", value: StatsFormatter.tierCost(
                     detail.speed.standard.costUSD,
                     hasUnpricedUsage: detail.speed.standardHasUnpricedCost
-                )),
-                (tr("Fast estimated cost", "Fast 估算费用"), StatsFormatter.tierCost(
+                ))
+                Divider()
+                DetailValueRow(label: "Fast", value: StatsFormatter.tierCost(
                     detail.speed.fast.costUSD,
                     hasUnpricedUsage: detail.speed.fastHasUnpricedCost
-                )),
-                (tr("Input", "输入"), StatsFormatter.tierCostPrecise(
+                ))
+                Divider()
+                    .padding(.vertical, 4)
+                DetailValueRow(label: tr("Input", "输入"), value: StatsFormatter.tierCostPrecise(
                     detail.costs.input,
                     hasUnpricedUsage: detail.costs.hasUnpricedUsage
-                )),
-                (tr("Output", "输出"), StatsFormatter.tierCostPrecise(
+                ))
+                Divider()
+                DetailValueRow(label: tr("Output", "输出"), value: StatsFormatter.tierCostPrecise(
                     detail.costs.output,
                     hasUnpricedUsage: detail.costs.hasUnpricedUsage
-                )),
-                (tr("Cache read", "缓存读取"), StatsFormatter.tierCostPrecise(
+                ))
+                Divider()
+                DetailValueRow(label: tr("Cache read", "缓存读取"), value: StatsFormatter.tierCostPrecise(
                     detail.costs.cacheRead,
                     hasUnpricedUsage: detail.costs.hasUnpricedUsage
-                )),
-                (tr("Cache write", "缓存写入"), detail.info.cacheCreationAvailable ? StatsFormatter.tierCostPrecise(
-                    detail.costs.cacheCreation,
-                    hasUnpricedUsage: detail.costs.hasUnpricedUsage
-                ) : "N/A"),
-                (tr("Total", "合计"), costLabel(detail.costs))
-            ])
+                ))
+                Divider()
+                DetailValueRow(
+                    label: tr("Cache write", "缓存写入"),
+                    value: detail.info.cacheCreationAvailable ? StatsFormatter.tierCostPrecise(
+                        detail.costs.cacheCreation,
+                        hasUnpricedUsage: detail.costs.hasUnpricedUsage
+                    ) : "N/A"
+                )
+            }
         }
     }
 
-    private var speedDetails: some View {
-        DetailPanel(title: tr("Speed usage", "速度档位用量")) {
-            DetailGrid(items: [
-                (tr("Standard tokens", "Standard Tokens"), StatsFormatter.compactToken(detail.speed.standard.totalTokens)),
-                (tr("Fast tokens", "Fast Tokens"), StatsFormatter.compactToken(detail.speed.fast.totalTokens)),
-                (tr("Billing-equivalent tokens", "计费等效 Tokens"), StatsFormatter.billingEquivalentTokens(detail.speed)),
-                (tr("Fast multiplier", "Fast 倍率"), StatsFormatter.fastMultiplier(detail.speed)),
-                (tr("Unrecognized tokens", "未识别 Tokens"), StatsFormatter.compactToken(detail.speed.unknown.totalTokens)),
-                (tr("Standard requests", "Standard 请求"), StatsFormatter.token(detail.speed.standard.requestCount)),
-                (tr("Fast requests", "Fast 请求"), StatsFormatter.token(detail.speed.fast.requestCount)),
-                (tr("Unrecognized requests", "未识别请求"), StatsFormatter.token(detail.speed.unknown.requestCount))
-            ])
-        }
-    }
-
-    private var modelDetails: some View {
-        DetailPanel(title: tr("By model", "按模型")) {
-            VStack(spacing: 8) {
+    private func modelDetails(fillHeight: Bool) -> some View {
+        DetailPanel(title: tr("By model", "按模型"), fillHeight: fillHeight) {
+            VStack(spacing: 0) {
                 ForEach(detail.models) { item in
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(item.model).fontWeight(.medium)
+                        HStack(spacing: 6) {
+                            Text(item.model)
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
                             UsageSpeedBadge(summary: item.speed.summary)
-                            Spacer()
-                            Text("\(StatsFormatter.compactToken(item.totals.totalTokens)) Tokens")
-                            Text(costLabel(item.costs)).fontWeight(.semibold)
+                            Spacer(minLength: 6)
+                            Text(StatsFormatter.compactToken(item.totals.totalTokens))
+                                .font(.system(size: 10.5))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .fixedSize()
+                            Text(costLabel(item.costs))
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .monospacedDigit()
+                                .frame(width: 76, alignment: .trailing)
                         }
                         Text("in \(StatsFormatter.compactToken(item.totals.inputTokens))  ·  out \(StatsFormatter.compactToken(item.totals.outputTokens))  ·  cache \(StatsFormatter.compactToken(item.totals.cacheReadTokens))")
                             .font(.system(size: 10.5, design: .monospaced))
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         if item.speed.fast.requestCount > 0 {
                             Text("Fast \(StatsFormatter.compactToken(item.speed.fast.totalTokens))  ·  \(tr("billing equivalent", "计费等效")) \(StatsFormatter.billingEquivalentTokens(item.speed))  ·  \(StatsFormatter.fastMultiplier(item.speed))  ·  \(StatsFormatter.tierCost(item.speed.fast.costUSD, hasUnpricedUsage: item.speed.fastHasUnpricedCost))")
                                 .font(.system(size: 10.5, design: .monospaced))
                                 .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                    .padding(.vertical, 6)
                     if item.id != detail.models.last?.id { Divider() }
                 }
             }
         }
+    }
+
+    /// Standard / Fast / 未识别三档的原始 Tokens 与请求数，底部一行 Fast 计费等效 Tokens 与倍率。
+    private func speedDetails(fillHeight: Bool) -> some View {
+        DetailPanel(title: tr("Speed tiers", "速度档位"), fillHeight: fillHeight) {
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    Text(tr("Tier", "档位"))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Tokens")
+                        .frame(width: 90, alignment: .trailing)
+                    Text(tr("Requests", "请求"))
+                        .frame(width: 52, alignment: .trailing)
+                }
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .padding(.bottom, 6)
+                Divider()
+                speedRow("Standard", detail.speed.standard)
+                Divider()
+                speedRow("Fast", detail.speed.fast)
+                Divider()
+                speedRow(tr("Unrecognized", "未识别"), detail.speed.unknown)
+                Divider()
+                Text(tr(
+                    "Billing equivalent \(StatsFormatter.billingEquivalentTokens(detail.speed)) tokens · Fast multiplier \(StatsFormatter.fastMultiplier(detail.speed))",
+                    "计费等效 \(StatsFormatter.billingEquivalentTokens(detail.speed)) Tokens · Fast 倍率 \(StatsFormatter.fastMultiplier(detail.speed))"
+                ))
+                .font(.system(size: 11))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private func speedRow(_ label: String, _ tier: UsageTotals) -> some View {
+        HStack(spacing: 0) {
+            Text(label)
+                .fontWeight(.semibold)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(StatsFormatter.compactToken(tier.totalTokens))
+                .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .trailing)
+            Text(StatsFormatter.token(tier.requestCount))
+                .foregroundStyle(.secondary)
+                .frame(width: 52, alignment: .trailing)
+        }
+        .font(.system(size: 11.5))
+        .monospacedDigit()
+        .lineLimit(1)
+        .padding(.vertical, 5)
     }
 
     private var cacheCreationText: String {
@@ -581,21 +820,6 @@ private struct ConversationDetailView: View {
         let days = seconds / 86400
         return tr(days == 1 ? "\(days) day" : "\(days) days", "\(days) 天")
     }
-
-    private func metadataRow(_ label: String, _ value: String, copyable: Bool = false) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label).foregroundStyle(.secondary).frame(width: 90, alignment: .leading)
-            Text(value).textSelection(.enabled).lineLimit(2)
-            if copyable {
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(value, forType: .string)
-                } label: { Image(systemName: "doc.on.doc") }
-                .buttonStyle(.borderless)
-            }
-        }
-        .font(.system(size: 10.5))
-    }
 }
 
 private struct UsageSpeedBadge: View {
@@ -614,17 +838,22 @@ private struct UsageSpeedBadge: View {
     }
 
     private func badge(_ text: String, icon: String) -> some View {
-        Label(text, systemImage: icon)
-            .font(.system(size: 9.5, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Color.secondary.opacity(0.11), in: Capsule())
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+            Text(text)
+        }
+        .font(.system(size: 9.5, weight: .semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Color.secondary.opacity(0.11), in: Capsule())
+        .fixedSize()
     }
 }
 
 private struct DetailPanel<Content: View>: View {
     let title: String
+    var fillHeight = false
     @ViewBuilder var content: () -> Content
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -632,22 +861,71 @@ private struct DetailPanel<Content: View>: View {
             content()
         }
         .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: fillHeight ? .infinity : nil, alignment: .topLeading)
         .ccPanel(cornerRadius: 10)
     }
 }
 
-private struct DetailGrid: View {
-    let items: [(String, String)]
-    private let columns = [GridItem(.flexible()), GridItem(.flexible())]
+/// 详情面板里的「标签 … 数值」行。`token` 用于 Token 构成：圆点透明度（`TokenCategoryStyle`，
+/// 0 表示只留圆点位置）与占比文字。
+private struct DetailValueRow: View {
+    let label: String
+    let value: String
+    var token: (dotOpacity: Double, share: String)? = nil
+
     var body: some View {
-        LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
-            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.0).font(.system(size: 10)).foregroundStyle(.secondary)
-                    Text(item.1).font(.system(size: 12.5, weight: .semibold)).monospacedDigit()
-                }
+        HStack(spacing: 8) {
+            if let token {
+                Circle()
+                    .fill(Color.primary.opacity(token.dotOpacity))
+                    .frame(width: 8, height: 8)
+            }
+            Text(label)
+                .font(.system(size: 12))
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.system(size: 12.5, weight: .semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+            if let token {
+                Text(token.share)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(width: 48, alignment: .trailing)
             }
         }
+        .padding(.vertical, 7)
+    }
+}
+
+/// 按内容取宽、最宽 `maxWidth`；内容更宽时按上限重新布局，让里面的文字截断。
+/// `.frame(maxWidth:)` 做不到——它会把短内容也撑到上限宽度。
+private struct CappedWidth: ViewModifier {
+    let maxWidth: CGFloat
+
+    func body(content: Content) -> some View {
+        CappedWidthLayout(maxWidth: maxWidth) { content }
+    }
+}
+
+private struct CappedWidthLayout: Layout {
+    let maxWidth: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let subview = subviews.first else { return .zero }
+        return subview.sizeThatFits(childProposal(proposal, subview))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
+    }
+
+    private func childProposal(_ proposal: ProposedViewSize, _ subview: LayoutSubview) -> ProposedViewSize {
+        let ideal = subview.sizeThatFits(.unspecified).width
+        let limit = min(maxWidth, proposal.width ?? .infinity)
+        return ProposedViewSize(width: min(ideal, limit), height: proposal.height)
     }
 }
 
