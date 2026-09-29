@@ -112,7 +112,7 @@ struct QuotaCycleCardsSection: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Spacer(minLength: 6)
-                // 剩余状态由数字颜色表达：≥20% primary、<20% 橙、=0 红（统一走 statusColor）。
+                // 剩余状态由数字颜色表达：≥20% 石墨灰、<20% 橙、=0 红（统一走 statusColor）。
                 Text("\(tr("Official", "官方")) \(String(format: "%.0f%%", usedPercent))")
                     .font(.system(size: 12, weight: .semibold))
                     .monospacedDigit()
@@ -150,7 +150,7 @@ struct QuotaCycleCardsSection: View {
     }
 
     private func officialColor(remaining: Double) -> Color {
-        remaining >= 20 ? .primary : statusColor(remainingPercent: remaining, tint: .primary)
+        statusColor(remainingPercent: remaining, tint: .primary)
     }
 
     /// 空态卡：标签行固定在顶部，下方提示内容在剩余空间垂直居中。

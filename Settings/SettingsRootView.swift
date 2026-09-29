@@ -482,7 +482,8 @@ struct SettingsRootView: View {
                 label: "Recalculate usage",
                 chinese: "重新计算用量",
                 desc: "Rescan all local logs, fill in missing prices, and recompute every cost with the current pricing table.",
-                chineseDesc: "重新扫描全部本地日志，补齐缺价并按当前定价表重算所有费用"
+                chineseDesc: "重新扫描全部本地日志，补齐缺价并按当前定价表重算所有费用",
+                detail: recalculateOutcomeDetail
             ) {
                 HStack(spacing: 8) {
                     if appState.usageService.cycleUsageNeedsManualRecalculation, !isRecalculatingUsage {
@@ -503,16 +504,6 @@ struct SettingsRootView: View {
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                             .lineLimit(1)
-                    } else if !isRecalculatingUsage,
-                              let hint = rebuildOutcomeHint(appState.usageService.lastRebuildOutcome) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "exclamationmark.triangle")
-                            Text(hint)
-                        }
-                        .font(.system(size: 11))
-                        .foregroundStyle(.orange)
-                        .lineLimit(1)
-                        .help(appState.usageService.lastRebuildDiagnostic ?? "")
                     }
                     Button {
                         isRecalculatingUsage = true
@@ -555,7 +546,7 @@ struct SettingsRootView: View {
                 .fixedSize()
             }
             InsetDivider()
-            PrefsRow(label: "Launch at login", chinese: "开机自动启动") {
+            PrefsRow(label: "Launch at login", chinese: "开机自动启动", detail: launchAtLoginDetail) {
                 Toggle("", isOn: Binding(
                     get: { settings.launchAtLogin },
                     set: { newValue in
@@ -577,20 +568,6 @@ struct SettingsRootView: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .tint(.green)
-            }
-            if let launchAtLoginMessage {
-                InsetDivider()
-                PrefsRow(
-                    label: launchAtLoginMessageIsError ? "Error" : "Status",
-                    chinese: launchAtLoginMessageIsError ? "错误" : "状态"
-                ) {
-                    Text(launchAtLoginMessage)
-                        .font(.system(size: 11))
-                        .foregroundStyle(launchAtLoginMessageIsError ? Color.red : Color.secondary)
-                        .multilineTextAlignment(.trailing)
-                        .lineLimit(4)
-                        .frame(maxWidth: 360, alignment: .trailing)
-                }
             }
         }
 
@@ -1064,10 +1041,40 @@ struct SettingsRootView: View {
         return description
     }
 
+    /// 「重新计算用量」上一次的核对结果提示，放在描述下方，长文案换行显示。
+    private var recalculateOutcomeDetail: AnyView? {
+        guard !isRecalculatingUsage,
+              let hint = rebuildOutcomeHint(appState.usageService.lastRebuildOutcome)
+        else { return nil }
+        return AnyView(
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Image(systemName: "exclamationmark.triangle")
+                Text(hint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(.orange)
+            .padding(.top, 2)
+            .help(appState.usageService.lastRebuildDiagnostic ?? "")
+        )
+    }
+
+    /// 开机启动的状态 / 错误说明，作为「开机自动启动」的描述行。
+    private var launchAtLoginDetail: AnyView? {
+        guard let launchAtLoginMessage else { return nil }
+        return AnyView(
+            Text(launchAtLoginMessage)
+                .font(.system(size: 11))
+                .foregroundStyle(launchAtLoginMessageIsError ? Color.red : Color.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        )
+    }
+
     private var footer: some View {
         HStack(spacing: 8) {
-            Text(tr("CCBar \(shortVersion) · AI subscription quota & local usage stats",
-                    "CCBar \(shortVersion) · AI 订阅服务额度查询与本地用量统计"))
+            // 版本号只在「版本」行显示，页脚不重复。
+            Text(tr("CCBar · AI subscription quota & local usage stats",
+                    "CCBar · AI 订阅服务额度查询与本地用量统计"))
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
             Spacer()
@@ -1092,11 +1099,6 @@ struct SettingsRootView: View {
         let info = Bundle.main.infoDictionary
         return info?["CFBundleShortVersionString"] as? String ?? "0.0"
     }
-
-    private var shortVersion: String {
-        let info = Bundle.main.infoDictionary
-        return info?["CFBundleShortVersionString"] as? String ?? "1.0"
-    }
 }
 
 // MARK: - PrefsGroup
@@ -1111,8 +1113,9 @@ private struct PrefsGroup<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
+                // 13 semibold：不小于行标签（13 regular），组标题层级在行之上。
                 Text(tr(title, chinese))
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .kerning(-0.05)
                 if let desc, let chineseDesc {
                     Text(tr(desc, chineseDesc))
@@ -1140,10 +1143,13 @@ private struct PrefsRow<Trailing: View>: View {
     var leading: AnyView? = nil
     var desc: String? = nil
     var chineseDesc: String? = nil
+    /// 描述下方的附加行（状态、错误提示等），可多行换行，不占右侧控件区。
+    var detail: AnyView? = nil
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
+        // 右侧控件与左侧文字块垂直居中：描述有两行或带附加行时，控件不再贴着首行基线。
+        HStack(alignment: .center, spacing: 12) {
             if let leading { leading }
             VStack(alignment: .leading, spacing: 2) {
                 Text(tr(label, chinese))
@@ -1152,6 +1158,9 @@ private struct PrefsRow<Trailing: View>: View {
                     Text(tr(desc, chineseDesc))
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
+                }
+                if let detail {
+                    detail
                 }
             }
             Spacer()

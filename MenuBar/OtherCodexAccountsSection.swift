@@ -114,26 +114,27 @@ private struct ImportedCodexRow: View {
     private func quotaRow(label: String, window: QuotaWindow?) -> some View {
         HStack(spacing: 6) {
             Text(label)
-                .font(.system(size: 8.5, weight: .semibold))
+                .font(.system(size: 9, weight: .semibold))
                 .kerning(0.5)
-                .foregroundStyle(.quaternary)
+                .foregroundStyle(.tertiary)
                 .frame(width: 18, alignment: .leading)
 
+            // 标签 / 条高 / 数值字号与主卡片的次要额度行（compactLimitRow）一致。
             ProgressBar(
                 value: (window?.remainingPercent ?? 0) / 100,
                 tint: rowColor(window: window),
-                height: 2
+                height: 2.5
             )
 
             Text(percentText(window: window))
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 10.5, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(rowColor(window: window))
                 .frame(width: 30, alignment: .trailing)
 
             ResetTimeText(resetsAt: window?.resetsAt)
-                .font(.system(size: 10))
-                .foregroundStyle(.quaternary)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
                 .frame(width: 70, alignment: .trailing)
         }
     }

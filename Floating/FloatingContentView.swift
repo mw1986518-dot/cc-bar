@@ -4,8 +4,8 @@ import SwiftUI
 //
 // 见 docs/界面布局.md §2。
 // 默认变体:Two-row pill。
-// 结构:14pt 圆角 HUD 容器 + .hudWindow material 背景 + 两行 pill。
-// 每行:18pt ServiceTile + flex 4pt bar + 34pt 百分比(服务色)。
+// 结构:14pt 圆角 HUD 容器 + 窗背景色 / .popover material 叠加背景 + 两行 pill。
+// 每行:18pt ServiceTile + flex 4pt bar + 固定 38pt 百分比(剩余状态色)。
 
 struct FloatingContentView: View {
     @Environment(AppState.self) private var appState
@@ -26,7 +26,7 @@ struct FloatingContentView: View {
                 )
             }
             if providers.isEmpty {
-                Text(tr("No services", "未启用"))
+                Text(tr("No services", "未启用任何服务"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -61,6 +61,9 @@ private struct FloatingRow: View {
     let tint: Color
     let snapshot: QuotaSnapshot?
 
+    /// 百分比列固定宽：13pt semibold 的「100%」约 36pt，按最宽值定宽，各行进度条才等长。
+    private static let percentWidth: CGFloat = 38
+
     var body: some View {
         HStack(spacing: 8) {
             ServiceTile(
@@ -80,7 +83,7 @@ private struct FloatingRow: View {
                 Text("∞")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
-                    .frame(minWidth: 34, alignment: .trailing)
+                    .frame(width: Self.percentWidth, alignment: .trailing)
             } else {
                 ProgressBar(value: barValue, tint: barColor, height: 4)
                     .frame(minWidth: 56)
@@ -90,7 +93,7 @@ private struct FloatingRow: View {
                     .kerning(-0.3)
                     .monospacedDigit()
                     .foregroundStyle(barColor)
-                    .frame(minWidth: 34, alignment: .trailing)
+                    .frame(width: Self.percentWidth, alignment: .trailing)
             }
         }
     }

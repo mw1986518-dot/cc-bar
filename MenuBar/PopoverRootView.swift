@@ -157,7 +157,7 @@ struct PopoverRootView: View {
                 Text(tr("No services enabled", "未启用任何服务"))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
-                Text(tr("Enable a service in Settings → Accounts", "到「设置 → 账号」开启"))
+                Text(tr("Enable a service in Settings → Services & Accounts", "到「设置 → 服务与账号」开启"))
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
@@ -452,18 +452,21 @@ private struct ServiceBlockView: View {
         HStack(spacing: 9) {
             ServiceTile(logoName: logoName, fallback: fallback, tint: tint)
 
-            (
+            // 服务名与副标题之间用固定 8pt 间距，不用空格字符（空格宽度随字体变化）；
+            // 宽度不够时只截断副标题，服务名保持完整。
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
                     .kerning(-0.1)
-                    .foregroundColor(.primary)
-                + Text("   ")
-                + Text(subtitle)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                Text(subtitle)
                     .font(.system(size: 11))
-                    .foregroundColor(.secondary.opacity(0.75))
-            )
-            .lineLimit(1)
-            .truncationMode(.tail)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
 
             Spacer(minLength: 0)
 
@@ -526,7 +529,7 @@ private struct ServiceBlockView: View {
                 Text(primaryLimitTitle)
                     .font(.system(size: 9, weight: .semibold))
                     .kerning(0.5)
-                    .foregroundStyle(.quaternary)
+                    .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
             .frame(width: 72, alignment: .center)
@@ -559,7 +562,7 @@ private struct ServiceBlockView: View {
                     HStack(spacing: 0) {
                         BilingualInline(english: "reset", chinese: "重置")
                             .font(.system(size: 9.5))
-                            .foregroundStyle(.quaternary)
+                            .foregroundStyle(.tertiary)
 
                         // Spacer 必须在 showsCost 之外：showsCost 为 false 时这行只剩
                         // 一个子视图，HStack 会把它居中，"重置"会跑到行中间。
@@ -568,7 +571,7 @@ private struct ServiceBlockView: View {
                         if showsCost {
                             BilingualInline(english: "cost", chinese: "费用")
                                 .font(.system(size: 9.5))
-                                .foregroundStyle(.quaternary)
+                                .foregroundStyle(.tertiary)
                         }
                     }
                 }
@@ -584,7 +587,7 @@ private struct ServiceBlockView: View {
             Text(compactLimitLabel(limit))
                 .font(.system(size: 9, weight: .semibold))
                 .kerning(0.6)
-                .foregroundStyle(.quaternary)
+                .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .frame(width: 72, alignment: .leading)
 
@@ -597,7 +600,8 @@ private struct ServiceBlockView: View {
                 .frame(width: 32, alignment: .trailing)
 
             compactLimitStatus(limit)
-                .frame(width: 52, alignment: .trailing)
+                // 68pt 放得下悬浮 /「绝对时间」下的跨天格式 `MM-dd HH:mm`（10.5pt 约 61pt）。
+                .frame(width: 68, alignment: .trailing)
         }
     }
 
@@ -609,17 +613,17 @@ private struct ServiceBlockView: View {
         {
             Text(tr("Unused", "尚未使用"))
                 .font(.system(size: 10.5))
-                .foregroundStyle(.quaternary)
+                .foregroundStyle(.tertiary)
                 .lineLimit(1)
         } else if let resetsAt = limit.window.resetsAt {
             ResetTimeText(resetsAt: resetsAt)
                 .font(.system(size: 10.5))
-                .foregroundStyle(.quaternary)
+                .foregroundStyle(.tertiary)
                 .lineLimit(1)
         } else {
             Text(tr("Unknown", "未知"))
                 .font(.system(size: 10.5))
-                .foregroundStyle(.quaternary)
+                .foregroundStyle(.tertiary)
                 .lineLimit(1)
         }
     }
@@ -656,7 +660,7 @@ private struct ServiceBlockView: View {
         HStack(spacing: 4) {
             BilingualInline(english: english, chinese: chinese)
                 .font(.system(size: 10))
-                .foregroundStyle(.quaternary)
+                .foregroundStyle(.tertiary)
             Text(value)
                 .font(.system(size: 11, weight: .medium))
                 .monospacedDigit()

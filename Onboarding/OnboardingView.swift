@@ -102,6 +102,8 @@ private struct WelcomeStep: View {
     }
 }
 
+/// 图标按 macOS 模板导出（1024 画布里圆角矩形主体 824，四周透明留边），
+/// 框取 120 时可见主体约 96pt，与改模板前满铺图标的视觉大小一致。
 private struct AppIconBlock: View {
     var body: some View {
         Group {
@@ -110,10 +112,12 @@ private struct AppIconBlock: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
             } else {
+                // 回退方块没有透明留边，内缩到与真实图标主体同大。
                 fallback
+                    .padding(12)
             }
         }
-        .frame(width: 96, height: 96)
+        .frame(width: 120, height: 120)
         .shadow(color: .black.opacity(0.3), radius: 30, x: 0, y: 10)
     }
 
@@ -151,11 +155,12 @@ private struct DetectAccountsStep: View {
         VStack(alignment: .leading, spacing: 0) {
             Text(anyDetected
                  ? tr("We found these accounts", "检测到以下账号")
-                 : tr("No accounts detected yet", "未检测到账号,可稍后在设置中查看"))
+                 : tr("No accounts detected yet", "未检测到账号，可稍后在设置中查看"))
                 .font(.system(size: 18, weight: .bold))
                 .kerning(-0.3)
 
-            VStack(spacing: 10) {
+            // 5 行账号要在 520 高的窗口里放下：行间距 8、行内边距 10 / 14、tile 28、邮箱与凭据来源合一行。
+            VStack(spacing: 8) {
                 DetectedAccountRow(
                     title: "Codex",
                     subtitle: "OpenAI",
@@ -274,9 +279,9 @@ private struct DetectedAccountRow: View {
     let isDetected: Bool
 
     var body: some View {
-        HStack(spacing: 13) {
+        HStack(spacing: 12) {
             CheckmarkBox(checked: isDetected)
-            ServiceTile(logoName: logoName, fallback: fallback, tint: tint, size: 34, logoSize: 16, cornerRadius: 8)
+            ServiceTile(logoName: logoName, fallback: fallback, tint: tint, size: 28, logoSize: 15, cornerRadius: 7)
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
@@ -286,18 +291,25 @@ private struct DetectedAccountRow: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }
-                Text(email ?? tr("Not detected", "未检测到"))
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                Text(source)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                // 邮箱优先完整显示；凭据来源（Cursor 的路径很长）只占一行，放不下从中间截断。
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    Text(email ?? tr("Not detected", "未检测到"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                    Text(" · \(source)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
 
             Spacer()
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
         .ccPanel(cornerRadius: 12)
         .opacity(isDetected ? 1 : 0.6)
     }
@@ -330,7 +342,7 @@ private struct ReadOnlyInfoCard: View {
                     .font(.system(size: 11.5, weight: .medium))
                 Text(tr(
                     "CCBar reads quota status locally. It never sends your credentials anywhere.",
-                    "CCBar 仅本地读取额度,不会向任何地方发送你的凭据。"
+                    "CCBar 仅本地读取额度，不会向任何地方发送你的凭据。"
                 ))
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
@@ -495,7 +507,7 @@ private struct ReadyStep: View {
 
             Text(tr(
                 "Open Statistics now, or just keep an eye on the menu bar.",
-                "现在打开统计,或者直接在菜单栏盯着看。"
+                "现在打开统计，或者直接在菜单栏盯着看。"
             ))
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)

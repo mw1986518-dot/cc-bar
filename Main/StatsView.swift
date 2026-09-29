@@ -538,17 +538,22 @@ struct StatsView: View {
 
     private func quotaContent(canvasHeight: CGFloat, isWide: Bool) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 3) {
+            // 页头与概览顶栏同一写法：17 bold 标题 + 11pt 说明同一行，高度对齐分段控件的 24。
+            HStack(spacing: 12) {
                 Text(tr("Quota", "额度"))
-                    .font(.system(size: 18, weight: .semibold))
-                    .kerning(-0.2)
+                    .font(.system(size: 17, weight: .bold))
+                    .kerning(-0.4)
+                    .lineLimit(1)
+                    .fixedSize()
                 Text(tr(
                     "Current quota cycles and how quota changed.",
                     "当前额度周期的用量，以及额度的变化记录。"
                 ))
-                .font(.system(size: 11.5))
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
+            .frame(height: 24)
 
             if quotaApps.isEmpty {
                 VStack(spacing: 8) {
@@ -775,8 +780,9 @@ struct StatsView: View {
 
     // MARK: Top bar (segmented + custom)
 
+    /// 一行放不下（如最小窗口、英文）时拆成两行：第一行标题、说明、粒度，第二行范围控件铺满整行。
     private var topBar: some View {
-        HStack(spacing: 12) {
+        StatsTopBar(granularity: $granularity, range: $range) {
             Text(tr("Overview", "概览"))
                 .font(.system(size: 17, weight: .bold))
                 .kerning(-0.4)
@@ -792,41 +798,10 @@ struct StatsView: View {
             // Spacer 和两个 Picker 之间——那样每次出现都凭空插入约 170pt,把右对齐的
             // 控件整体推着左右平移。改成让它独占左侧剩余空间并在其中右对齐:视觉上仍
             // 紧贴控件左边,但剩余空间由它自己吃掉,控件位置只由自身宽度决定,不再被推动。
+            // idealWidth 0:不参与顶栏是否换行的判断(见 StatsTopBar)。
             StatsScanningIndicator()
-                .frame(maxWidth: .infinity, alignment: .trailing)
-
-            SegmentedBar(items: StatsGranularity.allCases,
-                         label: { tr($0.englishLabel, $0.chineseLabel) },
-                         selection: $granularity)
-
-            rangePicker
+                .frame(minWidth: 0, idealWidth: 0, maxWidth: .infinity, alignment: .trailing)
         }
-    }
-
-    /// 范围分段控件。三个粒度的段数不一样(日 9 段,周 / 月各 6 段):若让每组按自己的内容
-    /// 取宽,切换粒度时控件会忽宽忽窄,并把左边的粒度控件推得左右跳;若只取最宽一组而不
-    /// 拉伸,周 / 月又会在两个控件之间空出约 3 个段的空隙。
-    ///
-    /// 这里用段数最多的日粒度那组按自然宽度撑出总宽(`.hidden()`,只参与布局不显示),
-    /// 当前粒度的控件叠在上面等分填满。于是三个粒度总宽一致、右边缘齐平、与粒度控件之间
-    /// 没有空隙,代价是周 / 月的 6 段各自更宽——段内都是 2~3 个字,拉宽后仍是正常观感。
-    /// 宽度由布局系统算,不写死数值,改文案或换语言时自动跟着变。
-    private var rangePicker: some View {
-        SegmentedBar(items: StatsGranularity.day.ranges,
-                     label: { tr($0.englishLabel, $0.chineseLabel) },
-                     selection: .constant(StatsRange.today),
-                     uniformSegments: true)
-            .hidden()
-            .overlay {
-                SegmentedBar(items: granularity.ranges,
-                             label: { tr($0.englishLabel, $0.chineseLabel) },
-                             selection: $range,
-                             stretch: true)
-                    .frame(maxWidth: .infinity)
-                    // 段数随粒度变(9 / 6),不按粒度重建的话 SwiftUI 会跨粒度复用同一批段视图,
-                    // 把上一个粒度的段宽残留下来,切几次就宽度不一、控件也撑不满而居中留白。
-                    .id(granularity)
-            }
     }
 
     /// 标题旁的口径说明：`全部服务 · 2026-08-30 至 09-28`。
@@ -1274,6 +1249,7 @@ private struct StatsScanningIndicator: View {
                 Text(tr("Recalculating usage…", "正在重新计算用量…"))
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
     }
@@ -1980,7 +1956,7 @@ struct TopConversationRowView: View {
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.tertiary)
                     .frame(width: 14, alignment: .trailing)
-                ServiceMark(color: row.summary.info.app.tintColor, size: 10)
+                ServiceTile(app: row.summary.info.app, size: 14)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.summary.info.title ?? tr("Untitled", "（无标题）"))
                         .font(.system(size: 12.5, weight: .medium))
@@ -2198,7 +2174,144 @@ private struct LegendChip: View {
 /// 不留空隙,系统控件做不到,只能自绘:`stretch` 打开时各段等分容器宽度。
 /// 粒度控件一并换成同一组件,避免两个并排的控件一个系统一个自绘、圆角底色对不上。
 /// 样式见 设计风格「Segmented control」。
-private struct SegmentedBar<Item: Hashable>: View {
+// MARK: - Top bar & filter controls
+
+/// 统计页顶栏：左侧内容由页面给（概览是标题 + 口径说明，项目页是扫描状态），右侧粒度 + 范围分段控件。
+/// 一行放不下时拆成两行：第一行左侧内容 + 粒度，第二行范围控件铺满整行。
+/// 是否换行按内容实测（`ViewThatFits`），不用固定断点：英文两个分段控件合计约 880pt，
+/// 加上概览标题和说明约 1180pt，固定断点无论取多少都会让某个语言或页面要么挤、要么过早换行。
+/// 扫描提示这类会自行出现 / 消失的内容要把 idealWidth 设为 0，不参与判断，否则扫描一开始顶栏就会跳成两行。
+struct StatsTopBar<Leading: View>: View {
+    @Binding var granularity: StatsGranularity
+    @Binding var range: StatsRange
+    @ViewBuilder var leading: () -> Leading
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                leading()
+                granularityBar
+                StatsRangePicker(granularity: granularity, range: $range)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    leading()
+                    granularityBar
+                }
+                StatsRangePicker(granularity: granularity, range: $range, fillsWidth: true)
+            }
+        }
+    }
+
+    private var granularityBar: some View {
+        SegmentedBar(items: StatsGranularity.allCases,
+                     label: { tr($0.englishLabel, $0.chineseLabel) },
+                     selection: $granularity)
+    }
+}
+
+/// 范围分段控件。三个粒度的段数不一样(日 9 段,周 / 月各 6 段):若让每组按自己的内容
+/// 取宽,切换粒度时控件会忽宽忽窄,并把左边的粒度控件推得左右跳;若只取最宽一组而不
+/// 拉伸,周 / 月又会在两个控件之间空出约 3 个段的空隙。
+///
+/// 这里用段数最多的日粒度那组按自然宽度撑出总宽(`.hidden()`,只参与布局不显示),
+/// 当前粒度的控件叠在上面等分填满。于是三个粒度总宽一致、右边缘齐平、与粒度控件之间
+/// 没有空隙,代价是周 / 月的 6 段各自更宽——段内都是 2~3 个字,拉宽后仍是正常观感。
+/// 宽度由布局系统算,不写死数值,改文案或换语言时自动跟着变。
+///
+/// `fillsWidth` 用于窄画布的第二行：不再需要骨架，直接铺满整行、各段等分。
+struct StatsRangePicker: View {
+    let granularity: StatsGranularity
+    @Binding var range: StatsRange
+    var fillsWidth = false
+
+    var body: some View {
+        if fillsWidth {
+            bar
+        } else {
+            SegmentedBar(items: StatsGranularity.day.ranges,
+                         label: { tr($0.englishLabel, $0.chineseLabel) },
+                         selection: .constant(StatsRange.today),
+                         uniformSegments: true)
+                .hidden()
+                .overlay { bar }
+        }
+    }
+
+    private var bar: some View {
+        SegmentedBar(items: granularity.ranges,
+                     label: { tr($0.englishLabel, $0.chineseLabel) },
+                     selection: $range,
+                     stretch: true)
+            .frame(maxWidth: .infinity)
+            // 段数随粒度变(9 / 6),不按粒度重建的话 SwiftUI 会跨粒度复用同一批段视图,
+            // 把上一个粒度的段宽残留下来,切几次就宽度不一、控件也撑不满而居中留白。
+            .id(granularity)
+    }
+}
+
+/// 列表栏顶部过滤行的搜索框：外观与 `SegmentedBar` 容器同一套（高 24、圆角 7、同底色）。
+struct StatsSearchField: View {
+    let prompt: String
+    @Binding var text: String
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+            TextField(prompt, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5))
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 24)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06))
+        )
+    }
+}
+
+/// 过滤行里的无边框下拉菜单（排序等）：11.5pt 文案 + 8pt 下拉箭头，高 24。
+struct StatsFilterMenu<Item: Hashable>: View {
+    let items: [Item]
+    let label: (Item) -> String
+    @Binding var selection: Item
+
+    var body: some View {
+        Menu {
+            Picker("", selection: $selection) {
+                ForEach(items, id: \.self) { item in
+                    Text(label(item)).tag(item)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } label: {
+            HStack(spacing: 5) {
+                Text(label(selection))
+                    .font(.system(size: 11.5))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 6)
+            .frame(height: 24)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .pointingHandCursor()
+    }
+}
+
+struct SegmentedBar<Item: Hashable>: View {
     let items: [Item]
     let label: (Item) -> String
     @Binding var selection: Item
@@ -2404,6 +2517,8 @@ struct KPICard: View {
                 .monospacedDigit()
                 .foregroundStyle(.primary)
                 .lineLimit(1)
+                // 最小窗口下 8 张卡每张只剩约 60～110pt，大金额先缩字再截断。
+                .minimumScaleFactor(0.75)
         }
         .padding(.vertical, 11)
         .padding(.horizontal, 14)
@@ -2589,7 +2704,11 @@ private struct QuotaTimelineAccountPanel: View {
             }
             Spacer()
             if let window = activeWindow {
-                timelineMetric(label: tr("Current", "当前"), value: currentText(window))
+                timelineMetric(
+                    label: tr("Current", "当前"),
+                    value: currentText(window),
+                    color: statusColor(remainingPercent: window.currentRemaining.map { Double($0) }, tint: section.tint)
+                )
                 timelineMetric(
                     label: deltaLabel(window.kind),
                     value: StatsFormatter.quotaDelta(window.periods.first?.totalDelta ?? 0)
@@ -2608,14 +2727,15 @@ private struct QuotaTimelineAccountPanel: View {
         }
     }
 
-    private func timelineMetric(label: String, value: String) -> some View {
+    /// `color` 只有「当前」传剩余状态色，其余指标保持 secondary。
+    private func timelineMetric(label: String, value: String, color: Color = .secondary) -> some View {
         VStack(alignment: .trailing, spacing: 1) {
             Text(label)
                 .font(.system(size: 9.5))
                 .foregroundStyle(.tertiary)
             Text(value)
                 .font(.system(size: 11.5, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(color)
         }
     }
 

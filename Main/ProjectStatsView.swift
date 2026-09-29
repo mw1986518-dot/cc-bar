@@ -119,7 +119,7 @@ struct ProjectStatsView: View {
         let output = pageOutput
         let rows = listRows(output.overview.projects)
         VStack(spacing: 0) {
-            toolbar(projectCount: output.overview.projects.count)
+            toolbar
             Divider()
             HSplitView {
                 projectList(rows: rows, output: output)
@@ -146,52 +146,39 @@ struct ProjectStatsView: View {
 
     // MARK: Toolbar
 
-    private func toolbar(projectCount: Int) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField(tr("Search project name or path", "搜索项目名或路径"), text: $search)
-                .textFieldStyle(.roundedBorder)
-                .frame(minWidth: 160, maxWidth: 240)
-
-            Picker("", selection: $granularity) {
-                ForEach(StatsGranularity.allCases, id: \.self) { item in
-                    Text(tr(item.englishLabel, item.chineseLabel)).tag(item)
+    /// 顶栏只放扫描状态和粒度 / 范围分段控件（与概览同一组件）；搜索、项目数、排序在列表栏顶部的过滤行。
+    private var toolbar: some View {
+        StatsTopBar(granularity: $granularity, range: $range) {
+            HStack(spacing: 6) {
+                if appState.usageService.isScanning, !appState.usageService.conversationAggregator.isEmpty {
+                    ProgressView().controlSize(.small)
+                    Text(tr("Scanning…", "正在扫描…"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
-            .pickerStyle(.menu)
-            .fixedSize()
+            // idealWidth 0:扫描提示不参与顶栏是否换行的判断(见 StatsTopBar)。
+            .frame(minWidth: 0, idealWidth: 0, maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
 
-            Picker("", selection: $range) {
-                ForEach(granularity.ranges, id: \.self) { item in
-                    Text(tr(item.englishLabel, item.chineseLabel)).tag(item)
-                }
-            }
-            .pickerStyle(.menu)
-            .fixedSize()
-
-            Spacer()
-
-            if appState.usageService.isScanning, !appState.usageService.conversationAggregator.isEmpty {
-                ProgressView().controlSize(.small)
-                Text(tr("Scanning…", "正在扫描…"))
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-            }
-
+    private func filterRow(projectCount: Int) -> some View {
+        HStack(spacing: 6) {
+            StatsSearchField(prompt: tr("Search project name or path", "搜索项目名或路径"), text: $search)
             Text(tr("\(projectCount) projects", "\(projectCount) 个项目"))
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
-
-            Picker("", selection: $sort) {
-                ForEach(ProjectListSort.allCases, id: \.self) { item in Text(item.label).tag(item) }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .fixedSize()
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 4)
+            StatsFilterMenu(items: ProjectListSort.allCases, label: { $0.label }, selection: $sort)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 8)
+        .padding(.top, 10)
     }
 
     // MARK: List
@@ -199,6 +186,8 @@ struct ProjectStatsView: View {
     @ViewBuilder
     private func projectList(rows: [ProjectUsageRow], output: ProjectPageCache.Output) -> some View {
         VStack(spacing: 0) {
+            filterRow(projectCount: output.overview.projects.count)
+
             if range == .custom {
                 HStack(spacing: 8) {
                     DatePicker(tr("From", "起"), selection: $customFrom, displayedComponents: .date)
