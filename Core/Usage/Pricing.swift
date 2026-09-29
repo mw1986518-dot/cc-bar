@@ -156,6 +156,11 @@ nonisolated enum Pricing {
         "deepseek-v4.1-flash":          .init(input: 0.14,  output: 0.28,  cacheRead: 0.0028,   cacheCreation: 0),
         "deepseek-v4-flash":            .init(input: 0.14,  output: 0.28,  cacheRead: 0.0028,   cacheCreation: 0),
         "deepseek-v4-flash-vision-exp": .init(input: 0.14,  output: 0.28,  cacheRead: 0.0028,   cacheCreation: 0),
+        // `*-fast` 变体只有 Command Code 在售（DeepSeek 官方只提供 deepseek-flash 与 deepseek-v4-pro），
+        // 价取 Command Code 定价页：v4.1-flash-fast 同源分时计价，沿用「两段都取高峰价」口径单行入表，
+        // 两者都不进 timedOverrides，保持 B 类（远端目录永远命中不到，价只能由本表提供）。
+        "deepseek-v4.1-flash-fast":     .init(input: 0.32,  output: 1.16,  cacheRead: 0.032,    cacheCreation: 0),
+        "deepseek-v4-flash-fast":       .init(input: 0.28,  output: 0.56,  cacheRead: 0.07,     cacheCreation: 0),
         "deepseek-v3.2":                .init(input: 0.28,  output: 0.42,  cacheRead: 0.028,    cacheCreation: 0),
         "deepseek-v3.1":                .init(input: 0.55,  output: 1.67,  cacheRead: 0.055,    cacheCreation: 0),
         "deepseek-v3":                  .init(input: 0.28,  output: 1.11,  cacheRead: 0.028,    cacheCreation: 0),
