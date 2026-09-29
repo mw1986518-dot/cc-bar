@@ -45,16 +45,27 @@ nonisolated private struct TieredPricedPeriod: Sendable {
 }
 
 nonisolated enum Pricing {
-    /// 价格表与 cc-switch `seed_model_pricing` / CodexBar `CostUsagePricing` 对齐（2026 上半年价位）。
-    /// 命中不到时返回 nil。键为归一化后的模型名（循环剥 provider 前缀 `openai-codex/` / `openai/` /
-    /// `anthropic/` / `deepseek/` / `opencode-go/` / `commandcode/` / `command-code/`
-    /// 和末尾 `-YYYYMMDD` / `-YYYY-MM-DD` 日期段）。
+    /// 价格表按各厂商官方定价页核对（最近一次 2026-09-29），起点对齐 cc-switch `seed_model_pricing` /
+    /// CodexBar `CostUsagePricing`。命中不到时返回 nil。键为 `pricingKey(model:)` 归一化后的模型名（循环剥 provider 前缀
+    /// `openai-codex/` / `openai/` / `anthropic/` / `deepseek/` / `opencode-go/` / `commandcode/` /
+    /// `command-code/` / `antigravity/` / `z-ai/` / `zai/` / `minimax/` 和末尾 `-YYYYMMDD` /
+    /// `-YYYY-MM-DD` 日期段）。
+    ///
+    /// Google Gemini、Cursor / xAI、Z.ai、MiniMax 的价格只能在这里维护：远端价格目录只收
+    /// anthropic / openai / deepseek（见 `LiteLLMPricingDecoder` 与 `ModelsDevPricingDecoder` 的
+    /// `allowedProviders`），这几家厂商的 key 在远端目录里永远命中不到。
     static let table: [String: ModelPrice] = [
         // —— Claude 4.x / 5.x 系（input 已不含 cache_read）——
         // Fable 5.1 自发布起缓存读取即为 0.025x 基础输入价（$0.25）；Fable 5 仍为 0.1x。
         "claude-fable-5.1":  .init(input: 10,  output: 50,  cacheRead: 0.25, cacheCreation: 12.50),
         "claude-fable-5-1":  .init(input: 10,  output: 50,  cacheRead: 0.25, cacheCreation: 12.50),
         "claude-fable-5":    .init(input: 10,  output: 50,  cacheRead: 1.00, cacheCreation: 12.50),
+        // Mythos 5 / 5.1 与 Fable 5 / 5.1 同价：Mythos 5.1 缓存读取同为 0.025x（$0.25），Mythos 5 为 0.1x。
+        "claude-mythos-5.1":     .init(input: 10, output: 50, cacheRead: 0.25, cacheCreation: 12.50),
+        "claude-mythos-5-1":     .init(input: 10, output: 50, cacheRead: 0.25, cacheCreation: 12.50),
+        "claude-mythos-5":       .init(input: 10, output: 50, cacheRead: 1.00, cacheCreation: 12.50),
+        // Mythos Preview 是 Mythos 5 之前的邀请制版本，价格为 $25 / $125（缓存读 0.1x、5m 写入 1.25x）。
+        "claude-mythos-preview": .init(input: 25, output: 125, cacheRead: 2.50, cacheCreation: 31.25),
         // Opus 5.5 缓存读取为 0.05x 基础输入价。
         "claude-opus-5.5":   .init(input: 4,   output: 20,  cacheRead: 0.20, cacheCreation: 5),
         "claude-opus-5-5":   .init(input: 4,   output: 20,  cacheRead: 0.20, cacheCreation: 5),
@@ -67,6 +78,8 @@ nonisolated enum Pricing {
         "claude-opus-4":     .init(input: 15,  output: 75,  cacheRead: 1.50, cacheCreation: 18.75),
         // Sonnet 5 官方已确认 $2/$10 为固定标准价（原定 2026-09-01 涨价 $3/$15 已取消），列入 fixedLocalOverrideKeys 锁死。
         "claude-sonnet-5":   .init(input: 2,   output: 10,  cacheRead: 0.20, cacheCreation: 2.50),
+        // Sonnet 5.5（2026-09-28 发布）与 Sonnet 5 同价，官方未宣布涨价，不需要固定本地价。
+        "claude-sonnet-5-5": .init(input: 2,   output: 10,  cacheRead: 0.20, cacheCreation: 2.50),
         "claude-sonnet-4-7": .init(input: 3,   output: 15,  cacheRead: 0.30, cacheCreation: 3.75),
         "claude-sonnet-4-6": .init(input: 3,   output: 15,  cacheRead: 0.30, cacheCreation: 3.75),
         "claude-sonnet-4-5": .init(input: 3,   output: 15,  cacheRead: 0.30, cacheCreation: 3.75),
@@ -92,11 +105,13 @@ nonisolated enum Pricing {
         "gpt-5.5-pro":       .init(input: 30,   output: 180, cacheRead: 30,    cacheCreation: 0),
         "gpt-5.4":           .init(input: 2.50, output: 15,  cacheRead: 0.25,  cacheCreation: 0),
         "gpt-5.4-codex":     .init(input: 2.50, output: 15,  cacheRead: 0.25,  cacheCreation: 0),
-        "gpt-5.4-mini":      .init(input: 0.25, output: 2,   cacheRead: 0.025, cacheCreation: 0),
-        "gpt-5.3":           .init(input: 1.25, output: 10,  cacheRead: 0.125, cacheCreation: 0),
-        "gpt-5.3-codex":     .init(input: 1.25, output: 10,  cacheRead: 0.125, cacheCreation: 0),
-        "gpt-5.2":           .init(input: 1.25, output: 10,  cacheRead: 0.125, cacheCreation: 0),
-        "gpt-5.2-codex":     .init(input: 1.25, output: 10,  cacheRead: 0.125, cacheCreation: 0),
+        "gpt-5.4-mini":      .init(input: 0.75, output: 4.50, cacheRead: 0.075, cacheCreation: 0),
+        "gpt-5.4-nano":      .init(input: 0.20, output: 1.25, cacheRead: 0.02,  cacheCreation: 0),
+        // GPT-5.2 起该档位是 $1.75 / $14，不是 GPT-5.1 的 $1.25 / $10；5.3 系沿用同一价。
+        "gpt-5.3":           .init(input: 1.75, output: 14,  cacheRead: 0.175, cacheCreation: 0),
+        "gpt-5.3-codex":     .init(input: 1.75, output: 14,  cacheRead: 0.175, cacheCreation: 0),
+        "gpt-5.2":           .init(input: 1.75, output: 14,  cacheRead: 0.175, cacheCreation: 0),
+        "gpt-5.2-codex":     .init(input: 1.75, output: 14,  cacheRead: 0.175, cacheCreation: 0),
         "gpt-5.1":           .init(input: 1.25, output: 10,  cacheRead: 0.125, cacheCreation: 0),
         "gpt-5.1-codex":     .init(input: 1.25, output: 10,  cacheRead: 0.125, cacheCreation: 0),
         "gpt-5":             .init(input: 1.25, output: 10,  cacheRead: 0.125, cacheCreation: 0),
@@ -114,15 +129,21 @@ nonisolated enum Pricing {
         "o3-mini":           .init(input: 1.10, output: 4.40, cacheRead: 0.55,  cacheCreation: 0),
         "o4-mini":           .init(input: 1.10, output: 4.40, cacheRead: 0.55,  cacheCreation: 0),
 
-        // —— Cursor 官方模型 ——
-        "composer-2.5":         .init(input: 3,    output: 15,  cacheRead: 0.30, cacheCreation: 3.75),
-        "cursor-composer-2-5":  .init(input: 3,    output: 15,  cacheRead: 0.30, cacheCreation: 3.75),
-        "grok-4-6":             .init(input: 2,    output: 6,   cacheRead: 0.50, cacheCreation: 0),
-        "grok-4-5":             .init(input: 2,    output: 6,   cacheRead: 0.50, cacheCreation: 0),
+        // —— Cursor 官方模型（Cursor Models 池；官方无缓存写入费）——
+        // Composer 2.5 标准档 $0.5 / $2.5；产品内默认走 Fast 档 $3 / $15，Cursor 日志里即 `composer-2.5-fast`。
+        "composer-2.5":         .init(input: 0.50, output: 2.50, cacheRead: 0.20, cacheCreation: 0),
+        "cursor-composer-2-5":  .init(input: 0.50, output: 2.50, cacheRead: 0.20, cacheCreation: 0),
+        "composer-2.5-fast":    .init(input: 3,    output: 15,   cacheRead: 0.50, cacheCreation: 0),
+        "grok-4-7":             .init(input: 2,    output: 6,    cacheRead: 0.50, cacheCreation: 0),
+        "grok-4-6":             .init(input: 2,    output: 6,    cacheRead: 0.50, cacheCreation: 0),
+        "grok-4-5":             .init(input: 2,    output: 6,    cacheRead: 0.50, cacheCreation: 0),
 
-        // —— Google Gemini 系列 ——
-        "gemini-3.7-flash":  .init(input: 0.10, output: 0.40, cacheRead: 0.025,  cacheCreation: 0),
-        "gemini-3.1-pro":    .init(input: 1.25, output: 5.00, cacheRead: 0.3125, cacheCreation: 0),
+        // —— Google Gemini 系列（远端目录不收 Google，只能靠本表）——
+        // 3.7 / 3.8 Flash 同为 $0.75 / $3.75（促销价，到 2026-12-31）；2027-01-01 起的原价见 timedOverrides。
+        "gemini-3.8-flash":  .init(input: 0.75, output: 3.75,  cacheRead: 0.075, cacheCreation: 0),
+        "gemini-3.7-flash":  .init(input: 0.75, output: 3.75,  cacheRead: 0.075, cacheCreation: 0),
+        // 3.1 Pro 完整输入超过 200K 时整次请求改按长上下文价（见 contextPriceTiers）。
+        "gemini-3.1-pro":    .init(input: 2.00, output: 12.00, cacheRead: 0.20,  cacheCreation: 0),
 
         // —— DeepSeek 系列（与 cc-switch seed_model_pricing 对齐）——
         // 缓存语义：通过 Anthropic 兼容端点使用时 input 不含 cache_read，直接乘价。
@@ -140,6 +161,11 @@ nonisolated enum Pricing {
         "deepseek-v3":                  .init(input: 0.28,  output: 1.11,  cacheRead: 0.028,    cacheCreation: 0),
         "deepseek-chat":                .init(input: 0.27,  output: 1.10,  cacheRead: 0.07,     cacheCreation: 0),
         "deepseek-reasoner":            .init(input: 0.55,  output: 2.19,  cacheRead: 0.14,     cacheCreation: 0),
+        // —— 第三方网关模型（Command Code / OpenCode 转售，远端目录不收这些厂商）——
+        // Z.ai 官方价；GLM-5.3-FlashX、MiniMax M2 系未收录。
+        "glm-5.3":       .init(input: 1.40, output: 4.40, cacheRead: 0.26, cacheCreation: 0),
+        "glm-5.3-flash": .init(input: 0.15, output: 0.50, cacheRead: 0.03, cacheCreation: 0),
+        "minimax-m3":    .init(input: 0.30, output: 1.20, cacheRead: 0.06, cacheCreation: 0),
         // codex-auto-review 内部 review，官方未公开计费；不入表 → cost=0，token 仍记录
     ]
 
@@ -207,8 +233,11 @@ nonisolated enum Pricing {
     /// 5 分钟写入继续使用各模型 `ModelPrice.cacheCreation`（基础输入价的 1.25 倍）。
     private static let claudeCacheCreation1hMultiplier: Decimal = 2
 
-    /// OpenAI Standard API 的 GPT-6 / GPT-5.6 / GPT-5.5 上下文阶梯价（USD / 百万 token）。
-    /// 完整输入严格超过 272K 时，该次请求的输入、缓存读写和输出全部使用长上下文费率。
+    /// Standard API 的上下文阶梯价（USD / 百万 token）。完整输入严格超过该模型阈值时，
+    /// 该次请求的输入、缓存读写和输出全部使用长上下文费率。
+    /// OpenAI（GPT-6 / GPT-5.6 / GPT-5.5 / GPT-5.4）阈值为 272K；OpenAI 的 Priority / Fast 明确排除
+    /// 长上下文，超阈值时 Fast 侧返回 nil，不拿 Standard 长上下文价顶替。
+    /// Gemini 3.1 Pro 的阈值为 200K。
     /// `gpt-5.6` 是 Sol 的别名；Pro 是 reasoning.mode，不是独立 model slug。
     /// GPT-5.6 Sol 这里是 2026-08-21 促销前的原价，促销价见 `timedContextPriceTiers`。
     private static let contextPriceTiers: [String: ContextPriceTiers] = [
@@ -256,6 +285,22 @@ nonisolated enum Pricing {
             longContextThreshold: 272_000,
             shortContext: .init(input: 5, output: 30, cacheRead: 0.50, cacheCreation: 0),
             longContext: .init(input: 10, output: 45, cacheRead: 1, cacheCreation: 0)
+        ),
+        "gpt-5.4": .init(
+            longContextThreshold: 272_000,
+            shortContext: .init(input: 2.50, output: 15, cacheRead: 0.25, cacheCreation: 0),
+            longContext: .init(input: 5, output: 22.50, cacheRead: 0.50, cacheCreation: 0)
+        ),
+        "gpt-5.4-codex": .init(
+            longContextThreshold: 272_000,
+            shortContext: .init(input: 2.50, output: 15, cacheRead: 0.25, cacheCreation: 0),
+            longContext: .init(input: 5, output: 22.50, cacheRead: 0.50, cacheCreation: 0)
+        ),
+        // 远端目录只收 anthropic / openai / deepseek，Gemini 的阶梯只能在这里表达。
+        "gemini-3.1-pro": .init(
+            longContextThreshold: 200_000,
+            shortContext: .init(input: 2, output: 12, cacheRead: 0.20, cacheCreation: 0),
+            longContext: .init(input: 4, output: 18, cacheRead: 0.40, cacheCreation: 0)
         )
     ]
 
@@ -310,6 +355,17 @@ nonisolated enum Pricing {
         "deepseek-v4-flash-vision-exp": deepseekFlashPeriods,
         "deepseek-v4.1-flash": deepseekFlashPeriods,
         "deepseek-v4-pro": deepseekProPeriods,
+        "gemini-3.7-flash": geminiFlashPeriods,
+        "gemini-3.8-flash": geminiFlashPeriods,
+    ]
+
+    /// Gemini 3.7 / 3.8 Flash：表内 $0.75 / $3.75 是截至 2026-12-31 的促销价，
+    /// 2027-01-01 起恢复原价 $1.5 / $7.5；缓存读取按同比例由 $0.075 回到 $0.15。
+    private static let geminiFlashPeriods: [PricedPeriod] = [
+        PricedPeriod(
+            from: utcDay(year: 2027, month: 1, day: 1),
+            price: ModelPrice(input: 1.50, output: 7.50, cacheRead: 0.15, cacheCreation: 0)
+        ),
     ]
 
     /// DeepSeek Flash（含官方兼容名与本机日志标识 `deepseek-v4.1-flash`）：
@@ -454,14 +510,32 @@ nonisolated enum Pricing {
 
     /// 归一化模型名：循环去支持的 provider 前缀（含嵌套两层，如 `commandcode/deepseek/...`）；
     /// 剥末尾 `-YYYY-MM-DD` 或 `-YYYYMMDD` 日期后缀；兼容 Vertex AI 的 `@日期` 写法。
+    /// 该结果同时是 Codex 旧存储身份与 Claude 存储身份（标识迁移按它对账旧快照），前缀表不能随定价需要扩充；
+    /// 只为查价而剥的前缀放在 `pricingKey(model:)`。
     nonisolated static func normalize(model: String) -> String {
+        normalize(model: model, stripping: identityPrefixes)
+    }
+
+    /// 查价用的模型键：在 `normalize(model:)` 基础上再剥转售标签，不作为任何存储身份。
+    nonisolated static func pricingKey(model: String) -> String {
+        normalize(model: model, stripping: pricingPrefixes)
+    }
+
+    private static let identityPrefixes = [
+        "openai-codex/", "openai/", "anthropic/", "deepseek/",
+        "opencode-go/", "commandcode/", "command-code/"
+    ]
+
+    /// Antigravity 与 Command Code / OpenCode 的转售标签：`antigravity/gemini-3.8-flash`、
+    /// `commandcode/z-ai/glm-5.3-flash`、`commandcode/minimax/minimax-m3`。
+    private static let pricingOnlyPrefixes = ["antigravity/", "z-ai/", "zai/", "minimax/"]
+
+    private static let pricingPrefixes = identityPrefixes + pricingOnlyPrefixes
+
+    private static func normalize(model: String, stripping providerPrefixes: [String]) -> String {
         var m = model
         // 循环剥除：Pi / OpenCode 日志里 provider 网关标签可能是 `commandcode/deepseek/...` 双层，
         // 剥掉外层后还要继续剥内层才能与本地表 / 远端目录对齐。
-        let providerPrefixes = [
-            "openai-codex/", "openai/", "anthropic/", "deepseek/",
-            "opencode-go/", "commandcode/", "command-code/"
-        ]
         var removed = true
         while removed {
             removed = false
@@ -536,7 +610,7 @@ nonisolated enum Pricing {
         at date: Date,
         inputTotal: Int? = nil
     ) -> CostBreakdown? {
-        let key = normalize(model: model)
+        let key = pricingKey(model: model)
         let fullInput = max(0, inputTotal ?? (input + cacheRead + cacheCreation + cacheCreation1h))
         guard let p = price(for: key, app: app, speed: speed, at: date, inputTotal: fullInput) else { return nil }
         let i = Decimal(input)     * p.input        / perMillion
@@ -665,13 +739,13 @@ nonisolated enum Pricing {
         speed: UsageSpeed = .standard,
         inputTotal: Int = 0
     ) -> Bool {
-        let key = normalize(model: model)
+        let key = pricingKey(model: model)
         return price(for: key, app: app, speed: speed, at: Date(), inputTotal: inputTotal) != nil
     }
 
     /// 是否应因缺价主动刷新远端目录。明确不计价的内部模型不会触发网络请求。
     static func needsRemotePriceRefresh(model: String, app: UsageApp, speed: UsageSpeed) -> Bool {
-        let key = normalize(model: model)
+        let key = pricingKey(model: model)
         guard speed != .unknown else { return false }
         if app == .codex, key == "codex-auto-review" { return false }
         return price(for: key, app: app, speed: speed, at: Date(), inputTotal: 0) == nil
@@ -685,7 +759,7 @@ nonisolated enum Pricing {
         case .unknown:
             return nil
         case .fast:
-            let key = normalize(model: model)
+            let key = pricingKey(model: model)
             switch app {
             case .codex:
                 // ChatGPT credit 倍率不是 API Priority 价格字段，不能从在线价格猜。
@@ -733,11 +807,12 @@ nonisolated enum Pricing {
     }
 
     /// 价格表内容指纹（SHA-256，确定性）。
-    /// 扫描状态 / 汇总缓存持久化它；内容一变（新增模型、改价、修正数值、调整限时覆盖，或 B 类模型
-    /// 的远端合并价变化）→ 指纹变 → 缓存自动失效并全量重扫重算历史桶，无需手动 bump 版本号。
+    /// 扫描状态 / 汇总缓存只把它当作诊断记录，**加载时不做比对**：价格变化既不让缓存失效，
+    /// 也不自动全量重扫重算历史桶（见 `ScanCache`）。新增模型、改价、修正数值或调整限时覆盖后，
+    /// 新条目按现价计，历史桶保持旧价，需要对齐时由用户在设置页手动「重新计算用量」。
     ///
     /// - Parameter knownUsage: 当前用量中实际出现过的 app/model/speed 集合。远端合并价只对
-    ///   这个集合算入哈希，避免远端新增本地未使用模型时触发无关全量重扫。
+    ///   这个集合算入哈希，避免远端目录里本地未使用模型的变化造成无关的指纹漂移。
     static func fingerprint(knownUsage: Set<PricingUsageKey>) -> String {
         let baseBody = table.keys.sorted().map { key -> String in
             let p = table[key]!

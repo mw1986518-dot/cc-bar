@@ -8,7 +8,7 @@ nonisolated struct PricingUsageKey: Sendable, Hashable {
 
     init(app: UsageApp, model: String, speed: UsageSpeed) {
         self.app = app
-        self.model = Pricing.normalize(model: model)
+        self.model = Pricing.pricingKey(model: model)
         self.speed = speed
     }
 

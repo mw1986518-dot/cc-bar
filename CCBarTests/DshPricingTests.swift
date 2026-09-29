@@ -20,16 +20,22 @@ final class DshPricingTests: XCTestCase {
     }
 
     /// 每百万 token 的费率（单位 USD），命中不到价格时为 nil。
+    /// 探针按 `tokens` 规模调一次再换算回百万单价；带上下文阶梯的模型必须用小探针，
+    /// 否则 1M 探针会越过阈值、读到长上下文费率。
     private func rates(
         _ model: String,
         at date: Date,
-        app: UsageApp = .dsh
+        app: UsageApp = .dsh,
+        tokens: Int = 1_000_000
     ) -> (input: Decimal?, output: Decimal?, cacheRead: Decimal?)? {
-        let one = 1_000_000
-        let input = Pricing.cost(app: app, model: model, speed: .standard, input: one, output: 0, cacheRead: 0, cacheCreation: 0, at: date)
-        let output = Pricing.cost(app: app, model: model, speed: .standard, input: 0, output: one, cacheRead: 0, cacheCreation: 0, at: date)
-        let cacheRead = Pricing.cost(app: app, model: model, speed: .standard, input: 0, output: 0, cacheRead: one, cacheCreation: 0, at: date)
-        return (input, output, cacheRead)
+        func perMillion(_ cost: Decimal?) -> Decimal? {
+            guard let cost else { return nil }
+            return cost * 1_000_000 / Decimal(tokens)
+        }
+        let input = Pricing.cost(app: app, model: model, speed: .standard, input: tokens, output: 0, cacheRead: 0, cacheCreation: 0, at: date)
+        let output = Pricing.cost(app: app, model: model, speed: .standard, input: 0, output: tokens, cacheRead: 0, cacheCreation: 0, at: date)
+        let cacheRead = Pricing.cost(app: app, model: model, speed: .standard, input: 0, output: 0, cacheRead: tokens, cacheCreation: 0, at: date)
+        return (perMillion(input), perMillion(output), perMillion(cacheRead))
     }
 
     /// 价格表里的字面量是 Double → Decimal，直接比 Decimal 会差在 1e-16 量级，因此按 double 值带容差比较。
@@ -59,10 +65,11 @@ final class DshPricingTests: XCTestCase {
         input: Double,
         output: Double,
         cacheRead: Double,
+        tokens: Int = 1_000_000,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        guard let rates = rates(model, at: date) else {
+        guard let rates = rates(model, at: date, tokens: tokens) else {
             return XCTFail("\(model) 在 \(date) 未定价", file: file, line: line)
         }
         assertClose(rates.input, input, "\(model) input @\(date)", file: file, line: line)
@@ -157,9 +164,10 @@ final class DshPricingTests: XCTestCase {
         // 同为 DeepSeek 但未纳入分段价的型号：现值不变（避免顺手改动其他价目）
         assertRates("deepseek-v3.2", at: utc(2026, 8, 1), input: 0.28, output: 0.42, cacheRead: 0.028)
         assertRates("deepseek-v3.2", at: utc(2026, 9, 15), input: 0.28, output: 0.42, cacheRead: 0.028)
-        // 跨服务：Gemini / Claude 在 DeepSeek 调价时点前后完全一致
-        assertRates("gemini-3.1-pro", at: utc(2026, 8, 1), input: 1.25, output: 5.00, cacheRead: 0.3125)
-        assertRates("gemini-3.1-pro", at: utc(2026, 9, 15), input: 1.25, output: 5.00, cacheRead: 0.3125)
+        // 跨服务：Gemini / Claude 在 DeepSeek 调价时点前后完全一致。
+        // Gemini 3.1 Pro 带 200K 上下文阶梯，探针必须落在短上下文内才能读到基础费率。
+        assertRates("gemini-3.1-pro", at: utc(2026, 8, 1), input: 2, output: 12, cacheRead: 0.2, tokens: 100_000)
+        assertRates("gemini-3.1-pro", at: utc(2026, 9, 15), input: 2, output: 12, cacheRead: 0.2, tokens: 100_000)
         assertRates("claude-sonnet-5", at: utc(2026, 8, 1), input: 2, output: 10, cacheRead: 0.2)
         assertRates("claude-sonnet-5", at: utc(2026, 9, 15), input: 2, output: 10, cacheRead: 0.2)
     }

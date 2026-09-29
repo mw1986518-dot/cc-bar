@@ -3270,6 +3270,10 @@ final class QuotaParsingTests: XCTestCase {
         ))
         XCTAssertEqual(Pricing.normalize(model: "openai-codex/gpt-5.5-codex"), "gpt-5.5-codex")
         XCTAssertEqual(Pricing.normalize(model: "anthropic/claude-sonnet-4-5"), "claude-sonnet-4-5")
+        // 转售标签只在查价时剥除，存储身份（normalize）保持旧规则，避免旧快照对账错位。
+        XCTAssertEqual(Pricing.normalize(model: "commandcode/z-ai/glm-5.3-flash"), "z-ai/glm-5.3-flash")
+        XCTAssertEqual(Pricing.pricingKey(model: "commandcode/z-ai/glm-5.3-flash"), "glm-5.3-flash")
+        XCTAssertEqual(Pricing.pricingKey(model: "antigravity/gemini-3.8-flash"), "gemini-3.8-flash")
     }
 
     func testGPT55StandardLongContextProAndFastRates() throws {
