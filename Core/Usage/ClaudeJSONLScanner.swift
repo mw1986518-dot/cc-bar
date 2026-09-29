@@ -221,6 +221,35 @@ enum ClaudeJSONLScanner {
                     costUSD: cost?.total,
                     costBreakdown: cost
                 ))
+                // advisor 与主调用同属一条 message.id，随主调用只入账一次；不算作独立请求。
+                for advisor in p.advisorUsages {
+                    let advisorCost = Pricing.costBreakdown(
+                        app: .claude,
+                        model: advisor.model,
+                        speed: .standard,
+                        input: advisor.inputTokens,
+                        output: advisor.outputTokens,
+                        cacheRead: advisor.cacheReadTokens,
+                        cacheCreation: advisor.cacheCreation.fiveMinuteTokens,
+                        cacheCreation1h: advisor.cacheCreation.oneHourTokens,
+                        at: p.timestamp
+                    )
+                    entries.append(UsageEntry(
+                        app: .claude,
+                        conversationKey: "claude:\(p.sessionID)",
+                        model: Pricing.normalize(model: advisor.model),
+                        speed: .standard,
+                        day: day,
+                        timestamp: p.timestamp,
+                        inputTokens: advisor.inputTokens,
+                        outputTokens: advisor.outputTokens,
+                        cacheReadTokens: advisor.cacheReadTokens,
+                        cacheCreationTokens: advisor.cacheCreation.totalTokens,
+                        requestCount: 0,
+                        costUSD: advisorCost?.total,
+                        costBreakdown: advisorCost
+                    ))
+                }
                 let key = "claude:\(p.sessionID)"
                 let seed = ConversationSeed(
                     key: key,
@@ -302,6 +331,16 @@ enum ClaudeJSONLScanner {
         var cacheCreation5mTokens: Int
         var cacheCreation1hTokens: Int
         var stopReason: String?
+        /// advisor 在服务端另起的推理；顶层 usage 不含这部分，只出现在 `usage.iterations`。
+        var advisorUsages: [AdvisorUsage] = []
+    }
+
+    struct AdvisorUsage: Sendable, Equatable {
+        var model: String
+        var inputTokens: Int
+        var outputTokens: Int
+        var cacheReadTokens: Int
+        var cacheCreation: CacheCreationUsage
     }
 
     struct CacheCreationUsage: Sendable, Equatable {
@@ -360,8 +399,27 @@ enum ClaudeJSONLScanner {
             cacheCreationTokens: cacheCreation.totalTokens,
             cacheCreation5mTokens: cacheCreation.fiveMinuteTokens,
             cacheCreation1hTokens: cacheCreation.oneHourTokens,
-            stopReason: stopReason
+            stopReason: stopReason,
+            advisorUsages: advisorUsages(in: usage)
         )
+    }
+
+    /// 顶层 usage 等于各 `type: "message"` 迭代之和，只需额外计入 `advisor_message` 项。
+    nonisolated static func advisorUsages(in usage: [String: Any]) -> [AdvisorUsage] {
+        guard let iterations = usage["iterations"] as? [[String: Any]] else { return [] }
+        return iterations.compactMap { item in
+            guard (item["type"] as? String) == "advisor_message" else { return nil }
+            let input = (item["input_tokens"] as? Int) ?? 0
+            let output = (item["output_tokens"] as? Int) ?? 0
+            if input == 0 && output == 0 { return nil }
+            return AdvisorUsage(
+                model: (item["model"] as? String) ?? "unknown",
+                inputTokens: input,
+                outputTokens: output,
+                cacheReadTokens: (item["cache_read_input_tokens"] as? Int) ?? 0,
+                cacheCreation: cacheCreationUsage(in: item)
+            )
+        }
     }
 
     /// `cache_creation_input_tokens` 是 UI/聚合使用的总口径；TTL 明细只影响计价。
