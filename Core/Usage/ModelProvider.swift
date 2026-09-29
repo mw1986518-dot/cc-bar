@@ -18,7 +18,7 @@ nonisolated enum ModelProvider: String, Sendable, CaseIterable {
     ///
     /// 顺序：前缀匹配 → 模型名关键词匹配 → 按 app 兜底 → 其他。
     /// - 前缀（Pi / OpenCode 日志保留 `provider/model` 形态）
-    /// - 关键词（Codex / Claude 入库时已 `Pricing.normalize` 剥前缀，剩裸模型名）
+    /// - 关键词（裸模型，以及未能验证渠道的旧 Codex / Claude 历史）
     /// - app 兜底：codex → OpenAI、claude → Anthropic（两者日志模型几乎固定厂商）
     static func resolve(app: UsageApp, model: String) -> ModelProvider {
         let m = model.lowercased()

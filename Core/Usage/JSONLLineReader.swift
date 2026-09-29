@@ -32,6 +32,7 @@ enum JSONLLineReader {
     nonisolated static func streamLines(
         url: URL,
         fromOffset offset: UInt64,
+        throughOffset: UInt64? = nil,
         chunkSize: Int = defaultChunkSize,
         batchLines: Int = defaultBatchLines,
         onBatch: (ArraySlice<String>) -> Void
@@ -47,6 +48,10 @@ enum JSONLLineReader {
         } catch {
             return failureStreamOutcome(for: url)
         }
+        // 历史标识迁移只能读取已提交 watermark 以内的完整行。文件比边界短、坏 UTF-8、
+        // 边界不在行尾都是内容层面的确定结果：以短于边界的 offset 返回，由调用方判为不可验证；
+        // `.failed` / `.missing` 只留给打开、读取失败和文件被移走这类可重试的情况。
+        if let throughOffset, end < throughOffset { return .success(newOffset: offset) }
         if offset >= end {
             return .success(newOffset: end)
         }
@@ -59,6 +64,7 @@ enum JSONLLineReader {
         let newline = UInt8(ascii: "\n")
         var pending = Data()
         var consumed: UInt64 = 0
+        var bytesRead = offset
         // 整块处理都包在池里：`FileHandle.read` 每块返回的是 autoreleased NSData 支撑的
         // Data，只包住解析回调的话这些块会一直挂到任务结束，长任务照样吃满内存。
         while true {
@@ -67,7 +73,12 @@ enum JSONLLineReader {
             autoreleasepool {
                 let chunk: Data?
                 do {
-                    chunk = try handle.read(upToCount: chunkSize)
+                    if let throughOffset, bytesRead >= throughOffset {
+                        finished = true
+                        return
+                    }
+                    let count = throughOffset.map { Int(min(UInt64(chunkSize), $0 - bytesRead)) } ?? chunkSize
+                    chunk = try handle.read(upToCount: count)
                 } catch {
                     failure = failureStreamOutcome(for: url)
                     return
@@ -76,6 +87,7 @@ enum JSONLLineReader {
                     finished = true
                     return
                 }
+                bytesRead += UInt64(chunk.count)
                 let appendedStart = pending.endIndex
                 pending.append(chunk)
                 // 单行长于块大小时本块没有换行，继续累积到出现换行为止；
@@ -83,6 +95,10 @@ enum JSONLLineReader {
                 guard let lastNewline = pending[appendedStart...].lastIndex(of: newline) else { return }
                 let completeEnd = pending.index(after: lastNewline)
                 let completePart = pending.subdata(in: pending.startIndex..<completeEnd)
+                if throughOffset != nil, decodingLines(completePart) == nil {
+                    finished = true
+                    return
+                }
                 pending.removeSubrange(pending.startIndex..<completeEnd)
                 consumed += UInt64(completePart.count)
                 emit(completePart, batchLines: batchLines, onBatch: onBatch)

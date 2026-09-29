@@ -284,3 +284,126 @@ nonisolated enum UsageHistoryRecoveryState: Sendable, Equatable {
     /// 没有可展示的有效历史，不能自动当成首装。
     case unavailable
 }
+
+/// 仅供 Codex 标识迁移使用；普通重算仍按原始完整模型键严格对账。
+/// 金额和时间范围也按旧键比较，不能用全局总额相等替代逐桶守恒。
+nonisolated extension UsageHistoryConsistency {
+    struct MigrationBalance: Equatable {
+        var cost: Decimal = 0
+        var input: Decimal = 0
+        var output: Decimal = 0
+        var read: Decimal = 0
+        var creation: Decimal = 0
+        var unpriced = false
+        var incomplete = false
+        var firstAt: Date?
+        var lastAt: Date?
+    }
+
+    struct MigrationCycleKey: Hashable {
+        var key: CycleVectorKey
+        var conversationKey: String?
+    }
+
+    static func migrationDayBalances(_ buckets: [UsageBucket]) -> [UsageVectorKey: MigrationBalance] {
+        var result: [UsageVectorKey: MigrationBalance] = [:]
+        for b in buckets {
+            let key = UsageVectorKey(app: b.app, day: b.day, model: b.model, speed: b.speed)
+            var balance = result[key] ?? MigrationBalance()
+            balance.cost += b.costUSD
+            balance.unpriced = balance.unpriced || b.hasUnpricedUsage
+            balance.incomplete = balance.incomplete || b.costIncomplete
+            result[key] = balance
+        }
+        return result
+    }
+
+    private static func migrationConversationBalances(
+        _ buckets: [ConversationUsageBucket]
+    ) -> [ConversationVectorKey: MigrationBalance] {
+        var result: [ConversationVectorKey: MigrationBalance] = [:]
+        for b in buckets {
+            let key = ConversationVectorKey(conversationKey: b.conversationKey, day: b.day, model: b.model, speed: b.speed)
+            var balance = result[key] ?? MigrationBalance()
+            balance.cost += b.costUSD
+            balance.input += b.inputCostUSD
+            balance.output += b.outputCostUSD
+            balance.read += b.cacheReadCostUSD
+            balance.creation += b.cacheCreationCostUSD
+            balance.unpriced = balance.unpriced || b.hasUnpricedUsage
+            balance.firstAt = min(balance.firstAt ?? b.firstAt, b.firstAt)
+            balance.lastAt = max(balance.lastAt ?? b.lastAt, b.lastAt)
+            result[key] = balance
+        }
+        return result
+    }
+
+    private static func migrationCycleVectors(
+        _ buckets: [CycleUsageBucket]
+    ) -> [MigrationCycleKey: UsageVectorCounts] {
+        var result: [MigrationCycleKey: UsageVectorCounts] = [:]
+        for b in buckets {
+            let key = migrationCycleKey(b)
+            var counts = result[key] ?? .zero
+            counts.inputTokens += b.inputTokens
+            counts.outputTokens += b.outputTokens
+            counts.cacheReadTokens += b.cacheReadTokens
+            counts.cacheCreationTokens += b.cacheCreationTokens
+            counts.requestCount += b.requestCount
+            result[key] = counts
+        }
+        return result
+    }
+
+    private static func migrationCycleKey(_ b: CycleUsageBucket) -> MigrationCycleKey {
+        MigrationCycleKey(key: CycleVectorKey(cycleID: b.cycleID, allowanceSegmentID: b.allowanceSegmentID,
+                                              app: b.app, model: b.model, speed: b.speed, quality: b.quality),
+                          conversationKey: b.conversationKey)
+    }
+
+    private static func migrationCycleBalances(_ buckets: [CycleUsageBucket]) -> [MigrationCycleKey: MigrationBalance] {
+        var result: [MigrationCycleKey: MigrationBalance] = [:]
+        for b in buckets {
+            let key = migrationCycleKey(b)
+            var balance = result[key] ?? MigrationBalance()
+            balance.cost += b.costUSD
+            balance.unpriced = balance.unpriced || b.hasUnpricedUsage
+            result[key] = balance
+        }
+        return result
+    }
+
+    /// origins 仅由迁移器根据原始调用产生，不能由裸模型名推测。
+    static func validateCodexIdentityMigration(
+        baseline: UsageSnapshot, candidate: UsageSnapshot, origins: [String: String]
+    ) -> Bool {
+        guard origins.allSatisfy({ Pricing.normalize(model: $0.key) == $0.value }),
+              baseline.scanState == candidate.scanState,
+              baseline.conversationRollup.infos == candidate.conversationRollup.infos,
+              baseline.usageRollup.buckets.filter({ $0.app != .codex }) == candidate.usageRollup.buckets.filter({ $0.app != .codex }),
+              baseline.conversationRollup.buckets.filter({ $0.app != .codex }) == candidate.conversationRollup.buckets.filter({ $0.app != .codex }),
+              baseline.cycleRollup.buckets.filter({ $0.app != .codex }) == candidate.cycleRollup.buckets.filter({ $0.app != .codex })
+        else { return false }
+        let day = candidate.usageRollup.buckets.map { bucket -> UsageBucket in
+            var b = bucket
+            if b.app == .codex { b.model = origins[b.model] ?? b.model }
+            return b
+        }
+        let conversation = candidate.conversationRollup.buckets.map { bucket -> ConversationUsageBucket in
+            var b = bucket
+            if b.app == .codex { b.model = origins[b.model] ?? b.model }
+            return b
+        }
+        let cycle = candidate.cycleRollup.buckets.map { bucket -> CycleUsageBucket in
+            var b = bucket
+            if b.app == .codex { b.model = origins[b.model] ?? b.model }
+            return b
+        }
+        return dayVector(baseline.usageRollup.buckets) == dayVector(day)
+            && conversationVector(baseline.conversationRollup.buckets) == conversationVector(conversation)
+            && migrationCycleVectors(baseline.cycleRollup.buckets) == migrationCycleVectors(cycle)
+            && migrationDayBalances(baseline.usageRollup.buckets) == migrationDayBalances(day)
+            && migrationConversationBalances(baseline.conversationRollup.buckets) == migrationConversationBalances(conversation)
+            && migrationCycleBalances(baseline.cycleRollup.buckets) == migrationCycleBalances(cycle)
+    }
+}

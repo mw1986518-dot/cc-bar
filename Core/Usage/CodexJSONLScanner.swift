@@ -2,7 +2,7 @@ import Foundation
 
 /// 扫 `~/.codex/sessions/**/*.jsonl` + `~/.codex/archived_sessions/**/*.jsonl`。
 /// 关键事件：
-///   - `type=turn_context`，`payload.model` 提供当前模型（剥前缀 / 日期后缀）。
+///   - `type=turn_context`，`payload.model` 提供当前模型（保留渠道前缀，兼容日期后缀）。
 ///   - `type=event_msg/payload.type=thread_settings_applied`，嵌套 `service_tier` 提供当前 Fast 档位。
 ///   - `type=event_msg`，`payload.type=token_count`，`payload.info.last_token_usage` 是本次调用的真实 token；
 ///     使用 last_token_usage 直接累计；累计 total_token_usage 未变化的设置回显事件跳过。
@@ -15,6 +15,13 @@ import Foundation
 /// 唯一可靠的判据是跨文件按 `(发出该记录的会话 id, 累计用量签名)` 去重：重放行与父文件里
 /// 的原始行同键，fork 之后的新调用累计值更高、键不同，正常入账（做法同 Pi 的 `/fork` 去重）。
 enum CodexJSONLScanner {
+    /// 存储身份与定价键分开：保留整个渠道链，裸模型和末段仍沿用日期 / 大小写规则。
+    nonisolated static func storageModel(_ model: String) -> String {
+        guard let slash = model.lastIndex(of: "/") else { return Pricing.normalize(model: model) }
+        let end = model.index(after: slash)
+        return String(model[..<end]) + Pricing.normalize(model: String(model[end...]))
+    }
+
     struct ThreadSettings: Sendable, Equatable {
         var model: String?
         var speed: UsageSpeed
@@ -28,6 +35,9 @@ enum CodexJSONLScanner {
         var filesScanned: Int
         var linesParsed: Int
         var failedFileCount: Int
+        /// 仅 `historicalBoundary` 模式：根目录不可访问、文件读取失败或扫描中被移走的数量。
+        /// 这类失败可重试，调用方不能把缺失的证据当成确定结果提交。
+        var historicalTransientFailureCount = 0
     }
 
     /// 文件级并发解析的最大并发数。codex 日志文件独立（会话互不重叠），
@@ -59,6 +69,9 @@ enum CodexJSONLScanner {
     /// - Parameter seenTokenIds: 上一轮持久化的跨文件去重键；缺省为空表示本轮从零建集合
     ///   （全量重扫走这条，测试同理）。
     /// - Parameter minimumMtime: 非 nil 时只扫修改时间不早于该时刻的文件（周期受限重建用）。
+    /// - Parameter historicalBoundary: 标识迁移用，从零重放到各文件已提交 offset；不定价，
+    ///   截断 / 无效记录 / 末尾上下文不符的文件不产出证据；读取失败、根目录不可访问、
+    ///   扫描中被移走的文件另计入 `historicalTransientFailureCount`。其返回进度不可用于增量续扫。
     /// - Parameter onProgress: 非 nil 时按批回报一次扫描进度。
     nonisolated static func scan(
         previous: [String: ScanFileState],
@@ -66,6 +79,7 @@ enum CodexJSONLScanner {
         roots: [URL],
         indexedTitles: [String: String],
         minimumMtime: Date? = nil,
+        historicalBoundary: [String: ScanFileState]? = nil,
         onProgress: ScanProgressCallback? = nil
     ) async -> Result {
         var filesByID: [String: JSONLFileDescriptor] = [:]
@@ -78,6 +92,7 @@ enum CodexJSONLScanner {
             if enumeration.accessFailed { failedRootCount += 1 }
             for file in enumeration.files {
                 let id = conversationID(from: file.url) ?? file.path
+                if let historicalBoundary, (historicalBoundary[id]?.offset ?? 0) == 0 { continue }
                 if let existing = filesByID[id] {
                     if file.modificationTime > existing.modificationTime {
                         filesByID[id] = file
@@ -102,6 +117,7 @@ enum CodexJSONLScanner {
         var seeds: [String: ConversationSeed] = [:]
         var linesParsed = 0
         var failedFileCount = failedRootCount
+        var historicalTransientFailureCount = historicalBoundary == nil ? 0 : failedRootCount
         // 跨文件去重：fork 会话把父会话的整段 token_count 历史重放进自己的 JSONL，
         // 同一条记录因此出现在多个文件里。键为 `发出该记录的会话 id#累计用量签名`。
         var seen = SeenIDSet(seenTokenIds)
@@ -127,14 +143,16 @@ enum CodexJSONLScanner {
                     if state?.mtime == file.modificationTime, state?.offset == file.size {
                         batchResults.append((
                             index,
-                            scanSingleFile(file: file, previous: previous, indexedTitles: indexedTitles)
+                            scanSingleFile(file: file, previous: previous, indexedTitles: indexedTitles,
+                                           boundary: historicalBoundary?[stateKey])
                         ))
                     } else {
                         group.addTask {
                             (index, scanSingleFile(
                                 file: file,
                                 previous: previous,
-                                indexedTitles: indexedTitles
+                                indexedTitles: indexedTitles,
+                                boundary: historicalBoundary?[stateKey]
                             ))
                         }
                     }
@@ -147,6 +165,10 @@ enum CodexJSONLScanner {
             batchResults.sort { $0.index < $1.index }
             for item in batchResults {
                 let result = item.result
+                if historicalBoundary != nil,
+                   result.fileDisappeared || (result.readFailed && !result.evidenceRejected) {
+                    historicalTransientFailureCount += 1
+                }
                 if result.fileDisappeared {
                     // sessions → archived_sessions 移动时会话 ID 不变；保留旧状态才能让
                     // 下轮从原 offset 续扫，不能删除后把整份归档从 0 重复计入。
@@ -211,7 +233,8 @@ enum CodexJSONLScanner {
             newSeenIds: seen.capped(to: SeenIDSet.defaultLimit),
             filesScanned: files.count,
             linesParsed: linesParsed,
-            failedFileCount: failedFileCount
+            failedFileCount: failedFileCount,
+            historicalTransientFailureCount: historicalTransientFailureCount
         )
     }
 
@@ -235,6 +258,8 @@ enum CodexJSONLScanner {
         var linesParsed: Int
         var readFailed: Bool
         var fileDisappeared: Bool = false
+        /// 历史证据与已提交边界不符（内容层面的确定结果），区别于可重试的读取失败。
+        var evidenceRejected: Bool = false
     }
 
     /// 解析单个 JSONL 文件（无共享可变状态，可并发执行）。
@@ -243,7 +268,8 @@ enum CodexJSONLScanner {
     private nonisolated static func scanSingleFile(
         file: JSONLFileDescriptor,
         previous: [String: ScanFileState],
-        indexedTitles: [String: String]
+        indexedTitles: [String: String],
+        boundary: ScanFileState? = nil
     ) -> CodexFileScanResult {
         let url = file.url
         let path = file.path
@@ -254,7 +280,7 @@ enum CodexJSONLScanner {
 
         var state = previous[stateKey] ?? ScanFileState(mtime: 0, offset: 0)
         // mtime 没变 & size 没变 → 跳过，用 state 元数据补种子。
-        if state.mtime == mtime, state.offset == size {
+        if boundary == nil, state.mtime == mtime, state.offset == size {
             if let id = state.conversationID ?? filenameID {
                 // 旧版本扫描过的文件没有记录分支：只读一次首行的 session_meta 补齐，
                 // 读到或确认没有分支后写回（空串表示已检查），之后不再读。
@@ -312,12 +338,17 @@ enum CodexJSONLScanner {
         var sessionBranch = nonEmpty(state.conversationGitBranch)
         var fallbackTitle = state.fallbackTitle
         var entries: [PendingCodexEntry] = []
+        var invalidHistoricalRecord = false
         // 按批流式解析：单文件不再把整份内容和全部行同时读进内存。
-        let outcome = JSONLLineReader.streamLines(url: url, fromOffset: state.offset) { batch in
+        let outcome = JSONLLineReader.streamLines(url: url, fromOffset: state.offset,
+                                                 throughOffset: boundary?.offset) { batch in
             for line in batch {
                 linesParsed += 1
                 guard let data = line.data(using: .utf8),
-                      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    invalidHistoricalRecord = true
+                    continue
+                }
                 let type = root["type"] as? String
 
                 if type == "session_meta", let payload = root["payload"] as? [String: Any] {
@@ -377,12 +408,13 @@ enum CodexJSONLScanner {
                    let parsed = JSONLTimestamp.parse(s) {
                     ts = parsed
                 } else {
+                    invalidHistoricalRecord = true
                     ts = Date()
                 }
                 let model = currentModel ?? "unknown"
                 guard let resolvedID = ownSessionID else { continue }
                 if let totalSignature { lastTotalUsageSignature = totalSignature }
-                let cost = Pricing.costBreakdown(
+                let cost = boundary == nil ? Pricing.costBreakdown(
                     app: .codex,
                     model: model,
                     speed: currentSpeed,
@@ -392,11 +424,11 @@ enum CodexJSONLScanner {
                     cacheCreation: cacheWrite,
                     at: ts,
                     inputTotal: inputTotal
-                )
+                ) : nil
                 let entry = UsageEntry(
                     app: .codex,
                     conversationKey: "codex:\(resolvedID)",
-                    model: Pricing.normalize(model: model),
+                    model: storageModel(model),
                     speed: currentSpeed,
                     day: UsageDay.startOfDay(for: ts),
                     timestamp: ts,
@@ -421,6 +453,16 @@ enum CodexJSONLScanner {
         let newOffset: UInt64
         switch outcome {
         case let .success(offset):
+            if let boundary,
+               invalidHistoricalRecord || offset != boundary.offset
+                || lastTotalUsageSignature != boundary.lastCodexTotalUsageSignature
+                || currentModel != boundary.lastModel
+                || currentSpeed != (boundary.lastServiceTier ?? .standard)
+                || ownSessionID != boundary.conversationID {
+                return CodexFileScanResult(stateKey: stateKey, state: state, entries: [],
+                                           seedKey: nil, seed: nil, linesParsed: linesParsed, readFailed: true,
+                                           evidenceRejected: true)
+            }
             newOffset = offset
         case .missing:
             return CodexFileScanResult(

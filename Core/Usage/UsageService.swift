@@ -134,6 +134,8 @@ final class UsageService {
     private var storeWriteDisabled = false
     /// 受限恢复的一次核对是否已在本进程尝试过，避免每轮都发起昂贵全量扫描。
     private var restrictedVerificationAttempted = false
+    /// Codex 标识迁移因可重试的读取失败本进程已推迟；下次启动再试，避免每轮全量重放。
+    private var codexModelIdentityMigrationDeferred = false
 
     #if DEBUG
     /// 在真实扫描完成、提交之前控制交错；只用于隔离测试。
@@ -855,7 +857,8 @@ final class UsageService {
             )
         }.value
         let claude = await claudeTask
-        let codex = await codexTask
+        var codex = await codexTask
+        if usesLegacyCodexModels { codex = Self.legacyCodexResult(codex) }
         let affectedCycles = cycles.filter { affectedCycleIDs.contains($0.id) }
         let failedApps = Self.cycleRebuildFailedApps(
             claude: claude,
@@ -1158,7 +1161,8 @@ final class UsageService {
             }
             : nil
         let claude = await claudeTask?.value
-        let codex = await codexTask?.value
+        var codex = await codexTask?.value
+        if usesLegacyCodexModels { codex = codex.map(Self.legacyCodexResult) }
         let pendingCycles = cycles.filter { pendingApps.contains($0.app) }
         let failedApps = Self.cycleRebuildFailedApps(
             claude: claude,
@@ -1298,7 +1302,8 @@ final class UsageService {
         guard !storeWriteDisabled else {
             return .commitFailed("usage history store is read-only")
         }
-        let candidate = await buildRebuildCandidate()
+        // 标识迁移尚未提交时（含没有可信进度的旧快照）按旧 Codex 身份严格核对。
+        let candidate = await buildRebuildCandidate(useLegacyCodexModels: usesLegacyCodexModels)
         #if DEBUG
         await candidateReadyForTesting?()
         #endif
@@ -1374,7 +1379,7 @@ final class UsageService {
     }
 
     /// 用独立聚合器构造完整候选。读取期间当前结果继续展示；这里不修改任何线上状态。
-    private func buildRebuildCandidate() async -> RebuildCandidate {
+    private func buildRebuildCandidate(useLegacyCodexModels: Bool = false) async -> RebuildCandidate {
         let progress: ScanProgressCallback? = { [weak self] progress in
             DispatchQueue.main.async { self?.scanProgress = progress }
         }
@@ -1428,7 +1433,8 @@ final class UsageService {
         }.value
 
         let claude = await claudeTask
-        let codex = await codexTask
+        var codex = await codexTask
+        if useLegacyCodexModels { codex = Self.legacyCodexResult(codex) }
         let pi = await piTask
         let opencode = await opencodeTask
         let dsh = await dshTask
@@ -1576,6 +1582,7 @@ final class UsageService {
         reportProgress: Bool = false,
         allowDeferredWrite: Bool = false
     ) async -> Bool {
+        guard await migrateCodexModelIdentityIfNeeded() else { return false }
         let started = Date()
         let prevSeen = prev.claudeSeenMessageIds
         let progress: ScanProgressCallback?
@@ -1639,7 +1646,8 @@ final class UsageService {
         }.value
 
         let claude = await claudeTask
-        let codex = await codexTask
+        var codex = await codexTask
+        if usesLegacyCodexModels { codex = Self.legacyCodexResult(codex) }
         let pi = await piTask
         let opencode = await opencodeTask
         let dsh = await dshTask
@@ -1869,6 +1877,9 @@ final class UsageService {
         guard !storeWriteDisabled else { return "usage history store is read-only" }
         let now = Date()
         var snapshot = UsageSnapshot()
+        // 首装没有旧标识；既有迁移结果必须跨增量、重算与周期提交保留。
+        snapshot.codexModelIdentityMigration = committedSnapshot?.codexModelIdentityMigration
+            ?? (committedSnapshot == nil ? CodexModelIdentityMigrationState() : nil)
         snapshot.snapshotID = snapshotID
         snapshot.createdAt = committedSnapshot?.createdAt ?? now
         snapshot.committedAt = now
@@ -1944,6 +1955,78 @@ final class UsageService {
         if let error { return error }
         committedSnapshot = snapshot
         return nil
+    }
+
+    /// 在第一次增量之前修复旧 Codex 身份；用量读取到旧 watermark 即止，进度不重置。
+    /// 所有调用都已持有 isScanning，失败时不继续追加；下一次扫描可从同一旧快照重试。
+    private func migrateCodexModelIdentityIfNeeded() async -> Bool {
+        guard let baseline = committedSnapshot, baseline.codexModelIdentityMigration == nil else { return true }
+        guard !storeWriteDisabled, baseline.hasScanProgress, historyRecoveryState == .complete,
+              !codexModelIdentityMigrationDeferred else { return true }
+        let codexRoots = roots.codexRoots
+        let evidence = await Task.detached(priority: .utility) {
+            await CodexJSONLScanner.scan(previous: [:], roots: codexRoots, indexedTitles: [:],
+                                         historicalBoundary: baseline.scanState.codex)
+        }.value
+        // 读取失败 / 根目录不可访问 / 扫描中被移走可能下次就恢复，不能当成确定结果提交。
+        // 本进程不再重试；在迁移提交前，新调用继续按旧身份入账（见 usesLegacyCodexModels），
+        // 下次启动以届时的进度为边界重试，旧键对账仍然成立。
+        guard evidence.historicalTransientFailureCount == 0 else {
+            codexModelIdentityMigrationDeferred = true
+            AppLog.warn(.usage, "Codex model identity migration deferred until next launch transient=\(evidence.historicalTransientFailureCount)")
+            return true
+        }
+        do {
+            let candidate: CodexModelIdentityMigration.Candidate
+            do {
+                candidate = try CodexModelIdentityMigration.makeCandidate(
+                    baseline: baseline, evidence: evidence,
+                    cycles: appState?.quotaCycles.records ?? [],
+                    accountSegments: appState?.quotaCycles.accountSegments ?? []
+                )
+            } catch {
+                // 候选被拒是确定性结果，重试不会变；保留全部旧桶并记录，不能让它阻塞增量采集。
+                AppLog.info(.usage, "Codex model identity migration candidate rejected; retaining all legacy models: \(error)")
+                candidate = try CodexModelIdentityMigration.makeRetainingCandidate(baseline: baseline)
+            }
+            if let error = await persistExistingSnapshot(candidate.snapshot) {
+                lastError = "Codex model identity migration commit failed: \(error)"
+                return false
+            }
+            let snapshot = candidate.snapshot
+            aggregator.load(from: snapshot.usageRollup.buckets)
+            conversationAggregator.load(infos: snapshot.conversationRollup.infos, buckets: snapshot.conversationRollup.buckets)
+            let validCycles = Set(appState?.quotaCycles.records.map(\.id) ?? [])
+            cycleAggregator.load(from: snapshot.cycleRollup.buckets.filter { validCycles.contains($0.cycleID) })
+            cachedScanState = snapshot.scanState
+            loadedRollupGeneration = snapshot.snapshotID
+            loadedCycleGeneration = snapshot.cycleRollup.generationID.isEmpty ? nil : snapshot.cycleRollup.generationID
+            lastRollupWriteAt = snapshot.committedAt
+            let result = snapshot.codexModelIdentityMigration!
+            AppLog.info(.usage, "Codex model identity migration committed migrated=\(result.migratedModels.count) retained=\(result.retainedModels.count) unreadable=\(evidence.failedFileCount)")
+            publishTotals()
+            return true
+        } catch {
+            lastError = "Codex model identity migration rejected; history preserved: \(error)"
+            return false
+        }
+    }
+
+    /// 已有历史但标识迁移尚未提交时，Codex 新条目沿用旧存储身份，保证迁移重试时仍能按旧键逐桶对账。
+    /// 首装或清空重建（没有已提交快照）直接使用完整渠道身份。
+    private var usesLegacyCodexModels: Bool {
+        guard let snapshot = committedSnapshot else { return false }
+        return snapshot.codexModelIdentityMigration == nil
+    }
+
+    private nonisolated static func legacyCodexResult(_ result: CodexJSONLScanner.Result) -> CodexJSONLScanner.Result {
+        var legacy = result
+        legacy.entries = result.entries.map { entry in
+            var old = entry
+            old.model = Pricing.normalize(model: entry.model)
+            return old
+        }
+        return legacy
     }
 
     /// 回滚到上一份成功提交的完整快照。没有提交过（首装）时清空内存。

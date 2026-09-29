@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		49C2AB04000000000001AAAA /* CodexModelIdentityMigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2AB03000000000001AAAA /* CodexModelIdentityMigrationTests.swift */; };
+		49C2AB02000000000001AAAA /* CodexModelIdentityMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2AB01000000000001AAAA /* CodexModelIdentityMigration.swift */; };
 		49C1BE03000000000001AAAA /* libzstd in Frameworks */ = {isa = PBXBuildFile; productRef = 49C1BE02000000000001AAAA /* libzstd */; };
 		49C1BE05000000000001AAAA /* libzstd in Frameworks */ = {isa = PBXBuildFile; productRef = 49C1BE04000000000001AAAA /* libzstd */; };
 		49C1BE09000000000001AAAA /* DshZstdFrames.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1BE06000000000001AAAA /* DshZstdFrames.swift */; };
@@ -148,6 +150,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		49C2AB03000000000001AAAA /* CodexModelIdentityMigrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexModelIdentityMigrationTests.swift; sourceTree = "<group>"; };
+		49C2AB01000000000001AAAA /* CodexModelIdentityMigration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexModelIdentityMigration.swift; sourceTree = "<group>"; };
 		4931AC302FC029A000EE598C /* CCBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CCBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4931AC3E2FC02A4200EE598C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		4931AC3F2FC02A4200EE598C /* ccbar.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ccbar.xcodeproj; sourceTree = "<group>"; };
@@ -480,6 +484,7 @@
 				49C1B151000000000001AAAA /* Pricing.swift */,
 				49C1B152000000000001AAAA /* JSONLLineReader.swift */,
 				49C1B153000000000001AAAA /* ClaudeJSONLScanner.swift */,
+				49C2AB01000000000001AAAA /* CodexModelIdentityMigration.swift */,
 				49C1B154000000000001AAAA /* CodexJSONLScanner.swift */,
 				49C1B32000000000000FAAAA /* PiJSONLScanner.swift */,
 				49C1B90000000000000FAAAA /* OpencodeScanner.swift */,
@@ -563,6 +568,7 @@
 				49C1BF09000000000001AAAA /* UpdateCheckerTests.swift */,
 				49C2AA07000000000001AAAA /* UsageSnapshotStoreTests.swift */,
 				49C2AA09000000000001AAAA /* UsageHistoryRecoveryTests.swift */,
+				49C2AB03000000000001AAAA /* CodexModelIdentityMigrationTests.swift */,
 				49C2AA0B000000000001AAAA /* UsageSafeRebuildTests.swift */,
 				49C2AA0D000000000001AAAA /* UsageHistoryTestHarness.swift */,
 				49C1B3F2000000000001AAAA /* Fixtures */,
@@ -750,6 +756,7 @@
 				49C1B151000000000001AABB /* Pricing.swift in Sources */,
 				49C1B152000000000001AABB /* JSONLLineReader.swift in Sources */,
 				49C1B153000000000001AABB /* ClaudeJSONLScanner.swift in Sources */,
+				49C2AB02000000000001AAAA /* CodexModelIdentityMigration.swift in Sources */,
 				49C1B154000000000001AABB /* CodexJSONLScanner.swift in Sources */,
 				49C1B32000000000000FAABB /* PiJSONLScanner.swift in Sources */,
 				49C1B90000000000000FAABB /* OpencodeScanner.swift in Sources */,
@@ -820,6 +827,7 @@
 				49C1BE1F000000000001AAAA /* DshAggregationRegressionTests.swift in Sources */,
 				49C2AA08000000000001AAAA /* UsageSnapshotStoreTests.swift in Sources */,
 				49C2AA0A000000000001AAAA /* UsageHistoryRecoveryTests.swift in Sources */,
+				49C2AB04000000000001AAAA /* CodexModelIdentityMigrationTests.swift in Sources */,
 				49C2AA0C000000000001AAAA /* UsageSafeRebuildTests.swift in Sources */,
 				49C2AA0E000000000001AAAA /* UsageHistoryTestHarness.swift in Sources */,
 				49C1BE1B000000000001AAAA /* DshPricingTests.swift in Sources */,

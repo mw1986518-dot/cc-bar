@@ -57,11 +57,17 @@ nonisolated struct UsageSnapshot: Sendable, Codable {
     var conversationRollup: ConversationRollupPayload = ConversationRollupPayload()
     var cycleRollup: CycleUsageRollupPayload = CycleUsageRollupPayload()
     var dshContributions: DshContributionPayload = DshContributionPayload()
+    /// 可选字段兼容旧 envelope / payload；与桶和进度原子提交，不使旧快照失效。
+    var codexModelIdentityMigration: CodexModelIdentityMigrationState?
 
     /// 结构性不变量。校验失败一律不写盘、不切换内存，避免「JSON 能解码」被当成可用。
     func validateStructure() throws {
         guard version == Self.currentVersion else {
             throw UsageSnapshotStructureError.unsupportedEnvelopeVersion(version)
+        }
+        if let migration = codexModelIdentityMigration,
+           migration.version != CodexModelIdentityMigrationState.currentVersion {
+            throw UsageSnapshotStructureError.unsupportedInnerVersion("codexModelIdentity", migration.version)
         }
         guard !snapshotID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw UsageSnapshotStructureError.missingSnapshotID
