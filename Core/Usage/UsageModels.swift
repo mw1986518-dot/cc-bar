@@ -190,6 +190,46 @@ nonisolated struct UsageSpeedBreakdown: Sendable, Equatable {
             unknownHasUnpricedCost = unknownHasUnpricedCost || hasUnpricedCost
         }
     }
+
+    /// 合并另一份已聚合的拆分（统计页把多个项目 / 模型并成「其余」行时用）。
+    mutating func merge(_ other: UsageSpeedBreakdown) {
+        standard.add(other.standard)
+        fast.add(other.fast)
+        unknown.add(other.unknown)
+        fastBillingEquivalentTokens += other.fastBillingEquivalentTokens
+        if let value = other.fastMinimumMultiplier {
+            fastMinimumMultiplier = min(fastMinimumMultiplier ?? value, value)
+        }
+        if let value = other.fastMaximumMultiplier {
+            fastMaximumMultiplier = max(fastMaximumMultiplier ?? value, value)
+        }
+        hasUnpricedFastEquivalent = hasUnpricedFastEquivalent || other.hasUnpricedFastEquivalent
+        standardHasUnpricedCost = standardHasUnpricedCost || other.standardHasUnpricedCost
+        fastHasUnpricedCost = fastHasUnpricedCost || other.fastHasUnpricedCost
+        unknownHasUnpricedCost = unknownHasUnpricedCost || other.unknownHasUnpricedCost
+    }
+}
+
+extension UsageTotals {
+    /// 逐项相减并截断到 0；用于「概览总量 − 已归属到项目的用量」这类残差。
+    /// 请求数、Tokens、金额分别截断，任何一项都不会出现负值。
+    nonisolated func clampedSubtracting(_ other: UsageTotals) -> UsageTotals {
+        var result = UsageTotals.zero
+        result.inputTokens = max(0, inputTokens - other.inputTokens)
+        result.outputTokens = max(0, outputTokens - other.outputTokens)
+        result.cacheReadTokens = max(0, cacheReadTokens - other.cacheReadTokens)
+        result.cacheCreationTokens = max(0, cacheCreationTokens - other.cacheCreationTokens)
+        result.costUSD = max(0, costUSD - other.costUSD)
+        result.requestCount = max(0, requestCount - other.requestCount)
+        result.hasUnpricedUsage = hasUnpricedUsage
+        result.costIncomplete = costIncomplete
+        return result
+    }
+
+    /// 是否有任何可展示的用量。
+    nonisolated var hasUsage: Bool {
+        totalTokens > 0 || costUSD > 0 || requestCount > 0
+    }
 }
 
 /// Decimal <-> String 编解码，避免 Double 精度漂。

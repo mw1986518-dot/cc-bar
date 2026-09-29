@@ -19,7 +19,9 @@ struct CCBarApp: App {
             MainWindowRootView()
                 .environment(appState)
         }
-        .defaultSize(width: 1600, height: 1100)
+        // 1440 宽放得下所有在售 MacBook 的默认分辨率；900 高在 13/14 寸屏上完整或接近完整显示，
+        // 统计页按画布高度分配一屏（见 `StatsView.overviewBottomRowMinHeight`）。
+        .defaultSize(width: 1440, height: 900)
         .commands {
             AppCommands(appState: appState)
         }

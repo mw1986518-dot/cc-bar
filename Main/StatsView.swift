@@ -319,8 +319,25 @@ enum StatsServiceFilter: Hashable, CaseIterable {
 enum StatsViewMode: Hashable {
     case overview
     case conversations
-    case cycles
-    case timeline
+    case projects
+    /// 额度：当前周期卡 + 额度变化时间线（原 Cycles 与 Timeline 合并）。
+    case quota
+}
+
+/// 统计页内的跨视图跳转请求（概览 → 对话 / 项目，项目 → 对话等）。
+/// 目标视图出现或请求变化时消费并清空；`id` 保证重复点击同一目标也会生效。
+struct StatsNavigationRequest: Equatable {
+    enum Target: Equatable {
+        case conversation(String)
+        case conversationsByCost
+        case conversationsInProject(String)
+        case projectsList
+        case project(String)
+        case unattributed
+    }
+
+    let id = UUID()
+    let target: Target
 }
 
 private struct CursorHistoryRequest: Hashable {
@@ -329,26 +346,6 @@ private struct CursorHistoryRequest: Hashable {
     let to: Date
 
     var range: Range<Date> { from..<to }
-}
-
-/// 「按提供商」面板的排序键；`other` 组在任何排序下都固定排最后。
-enum ProviderSort: CaseIterable, Identifiable {
-    case cost
-    case tokens
-    case requests
-    case name
-
-    var id: Self { self }
-
-    @MainActor
-    var label: String {
-        switch self {
-        case .cost: return tr("Cost", "费用")
-        case .tokens: return tr("Tokens", "Tokens")
-        case .requests: return tr("Requests", "请求数")
-        case .name: return tr("Name", "名称")
-        }
-    }
 }
 
 // MARK: - StatsView
@@ -363,11 +360,18 @@ struct StatsView: View {
     )
     @State private var customTo: Date = Calendar.current.startOfDay(for: Date())
     @State private var granularity: StatsGranularity = .day
-    @State private var providerSort: ProviderSort = .cost
     /// 概览派生结果的同步缓存，见 `StatsOverviewCache`。
     @State private var overviewCache = StatsOverviewCache()
     /// 时间线窗口视角全局统一，避免 Codex 与 Claude 默认落在不同口径。
     @State private var timelineWindow: QuotaLimitKind = .fiveHour
+    @State private var pendingNavigation: StatsNavigationRequest?
+    /// 一屏高度分配的实测值（规则见 `overviewBottomRowMinHeight`）：概览顶部组、概览下排、
+    /// 额度页整页内容、额度页账号面板网格、各账号面板除折线图外的高度。
+    @State private var overviewTopHeight: CGFloat = 0
+    @State private var overviewBottomHeight: CGFloat = 0
+    @State private var quotaContentHeight: CGFloat = 0
+    @State private var quotaGridHeight: CGFloat = 0
+    @State private var quotaPanelChromeHeights: [String: CGFloat] = [:]
 
     var body: some View {
         HStack(spacing: 0) {
@@ -379,19 +383,36 @@ struct StatsView: View {
             VStack(spacing: 0) {
                 StatsUsageErrorBanner()
 
-                if viewMode == .conversations {
+                switch viewMode {
+                case .conversations:
                     ConversationStatsView(
                         granularity: $granularity,
                         range: $range,
                         customFrom: $customFrom,
                         customTo: $customTo,
-                        serviceFilter: serviceFilter
+                        serviceFilter: serviceFilter,
+                        navigation: $pendingNavigation
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                } else {
+                case .projects:
+                    ProjectStatsView(
+                        granularity: $granularity,
+                        range: $range,
+                        customFrom: $customFrom,
+                        customTo: $customTo,
+                        serviceFilter: serviceFilter,
+                        navigation: $pendingNavigation,
+                        navigate: navigate,
+                        showServiceInOverview: { app in
+                            serviceFilter = filter(for: app)
+                            viewMode = .overview
+                        }
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                case .overview, .quota:
                     GeometryReader { proxy in
                         ScrollView {
-                            mainContent(canvasWidth: proxy.size.width, viewportHeight: proxy.size.height)
+                            mainContent(canvasWidth: proxy.size.width, canvasHeight: proxy.size.height)
                         }
                     }
                 }
@@ -412,68 +433,193 @@ struct StatsView: View {
         }
     }
 
-    /// 宽度断点:主画布达到该宽度时,时间线的折线图与表格改为左右并排;
+    /// 宽度断点:主画布达到该宽度时,概览与额度页的面板左右并排;
     /// 更窄(如最小窗口)时回落单列堆叠,避免内容挤压截断。
-    private static let wideCanvasWidth: CGFloat = 880
+    static let wideCanvasWidth: CGFloat = 880
+
+    /// 默认窗口 1440×900 下的一屏高度分配：概览下排（用量构成 + 高消耗对话）至少 390pt，
+    /// 用量柱状图那一排吃掉剩余高度、260~300pt；额度页折线图吃掉剩余高度、最低 170pt。
+    /// 其他区块变高（展开提供商、展开变动明细）时由这一块让出高度，降到下限后整页滚动。
+    static let overviewBottomRowMinHeight: CGFloat = 390
+    static let overviewUsageRowMinHeight: CGFloat = 260
+    /// 柱状图那一排的上限：窗口比默认高很多时不再继续拉高，多出的高度留在页面底部，
+    /// 避免图表和 Token 拆分被拉成细长比例、面板内部出现大块空白。
+    static let overviewUsageRowMaxHeight: CGFloat = 300
+    static let quotaTimelineChartMinHeight: CGFloat = 170
 
     @ViewBuilder
-    private func mainContent(canvasWidth: CGFloat, viewportHeight: CGFloat) -> some View {
+    private func mainContent(canvasWidth: CGFloat, canvasHeight: CGFloat) -> some View {
         let isWide = canvasWidth >= Self.wideCanvasWidth
         switch viewMode {
         case .overview:
-            overviewContent
-        case .conversations:
+            overviewContent(canvasWidth: canvasWidth, canvasHeight: canvasHeight, isWide: isWide)
+        case .quota:
+            quotaContent(canvasHeight: canvasHeight, isWide: isWide)
+        case .conversations, .projects:
             EmptyView()
-        case .cycles:
-            CycleStatsView()
-        case .timeline:
-            timelineContent(isWide: isWide, viewportHeight: viewportHeight)
         }
     }
 
-    private var overviewContent: some View {
+    private func overviewContent(canvasWidth: CGFloat, canvasHeight: CGFloat, isWide: Bool) -> some View {
         let model = overviewModel
         let scope = StatsOverviewScope(range: range, granularity: granularity, serviceFilter: serviceFilter)
+        let contentWidth = max(0, canvasWidth - 40)
         return VStack(alignment: .leading, spacing: 12) {
-            topBar
-            if range == .custom { customRangeRow }
+            VStack(alignment: .leading, spacing: 12) {
+                topBar
+                if range == .custom { customRangeRow }
 
-            OverviewKPIRow(model: model, serviceFilter: serviceFilter)
-                .padding(.top, 6)
+                OverviewKPIRow(model: model, serviceFilter: serviceFilter)
+                    .padding(.top, 6)
+            }
+            .onHeightChange { overviewTopHeight = $0 }
 
-            OverviewTokenBreakdownPanel(model: model)
-            OverviewByServicePanel(model: model)
+            StatsSplitRow(
+                isWide: isWide,
+                width: contentWidth,
+                leadingFraction: 2.0 / 3.0,
+                minHeight: isWide ? overviewUsageRowHeight(canvasHeight: canvasHeight) : nil
+            ) {
+                OverviewUsageChartPanel(model: model, granularity: granularity, scope: scope)
+            } trailing: {
+                OverviewTokenBreakdownPanel(model: model)
+            }
 
-            OverviewUsageChartPanel(model: model, granularity: granularity, scope: scope)
-
-            OverviewByModelPanel(model: model, serviceFilter: serviceFilter)
-            OverviewByProviderPanel(model: model, sort: $providerSort, scope: scope)
+            StatsSplitRow(
+                isWide: isWide,
+                width: contentWidth,
+                leadingFraction: 5.0 / 9.0,
+                minHeight: isWide ? Self.overviewBottomRowMinHeight : nil
+            ) {
+                OverviewCompositionPanel(
+                    model: model,
+                    scope: scope,
+                    onSelectService: { app in serviceFilter = filter(for: app) },
+                    navigate: navigate
+                )
+            } trailing: {
+                OverviewTopConversationsPanel(model: model, navigate: navigate)
+            }
+            .onHeightChange { overviewBottomHeight = $0 }
         }
         .padding(20)
     }
 
-    /// 时间线面板均分视口剩余高度:每个账号分区 `.maxHeight(.infinity)` 等分,
-    /// 面板内图表吃掉剩余、宽画布下表格拉满与图等高;内容最小高度总和超过视口时,
-    /// 由外层 ScrollView 兜底滚动(见 `viewportHeight` 只作 minHeight 的撑满技巧)。
-    private func timelineContent(isWide: Bool, viewportHeight: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+    /// 柱状图那一排 = 画布高 − 上下内边距 − 顶部组 − 下排 − 两个行间距，夹在上下限之间。
+    /// 顶部组与下排尚未测出时先按下限排，避免首帧撑出超高的一排。
+    private func overviewUsageRowHeight(canvasHeight: CGFloat) -> CGFloat {
+        guard overviewTopHeight > 0, overviewBottomHeight > 0 else { return Self.overviewUsageRowMinHeight }
+        let remaining = canvasHeight - 40 - overviewTopHeight - overviewBottomHeight - 12 * 2
+        return min(Self.overviewUsageRowMaxHeight, max(Self.overviewUsageRowMinHeight, remaining.rounded(.down)))
+    }
+
+    private func navigate(_ target: StatsNavigationRequest.Target) {
+        pendingNavigation = StatsNavigationRequest(target: target)
+        switch target {
+        case .conversation, .conversationsByCost, .conversationsInProject:
+            viewMode = .conversations
+        case .projectsList, .project, .unattributed:
+            viewMode = .projects
+        }
+    }
+
+    // MARK: Quota
+
+    /// 额度页随侧栏服务筛选：全部 → Codex + Claude；单选 Codex / Claude 只看该服务；
+    /// 其他服务没有额度周期与额度历史，整页显示空态。
+    private var quotaApps: [UsageApp] {
+        switch serviceFilter {
+        case .all: return [.codex, .claude]
+        case .codex: return [.codex]
+        case .claude: return [.claude]
+        case .cursor, .pi, .opencode, .dsh: return []
+        }
+    }
+
+    private func quotaContent(canvasHeight: CGFloat, isWide: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(tr("Quota", "额度"))
+                    .font(.system(size: 18, weight: .semibold))
+                    .kerning(-0.2)
+                Text(tr(
+                    "Current quota cycles and how quota changed.",
+                    "当前额度周期的用量，以及额度的变化记录。"
+                ))
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+            }
+
+            if quotaApps.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "gauge.with.needle")
+                        .font(.system(size: 24))
+                        .foregroundStyle(.tertiary)
+                    Text(tr("No quota data", "暂无额度数据"))
+                        .font(.system(size: 13, weight: .medium))
+                    Text(tr(
+                        "Only Codex and Claude Code report quota cycles.",
+                        "只有 Codex 与 Claude Code 提供额度周期。"
+                    ))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 220)
+                .ccPanel(cornerRadius: 12)
+            } else {
+                QuotaCycleCardsSection(apps: quotaApps, isWide: isWide)
+                quotaTimelineSection(canvasHeight: canvasHeight, isWide: isWide)
+            }
+        }
+        .onHeightChange { quotaContentHeight = $0 }
+        .padding(20)
+    }
+
+    private func quotaTimelineSection(canvasHeight: CGFloat, isWide: Bool) -> some View {
+        let sections = timelineSections
+        let columns = isWide ? 2 : 1
+        let chartHeight = quotaTimelineChartHeight(canvasHeight: canvasHeight, sections: sections, columns: columns)
+        return VStack(alignment: .leading, spacing: 12) {
             timelineHeader
-            if timelineSections.isEmpty {
+            if sections.isEmpty {
                 placeholderHeight(220, message: tr("No accounts", "暂无账号"))
                     .ccPanel(cornerRadius: 12)
             } else {
-                ForEach(timelineSections) { section in
-                    QuotaTimelineAccountPanel(
-                        section: section,
-                        selectedKind: timelineWindow,
-                        isWide: isWide
-                    )
-                    .frame(maxHeight: .infinity)
+                LazyVGrid(
+                    columns: Array(
+                        repeating: GridItem(.flexible(), spacing: 12, alignment: .top),
+                        count: columns
+                    ),
+                    alignment: .leading,
+                    spacing: 12
+                ) {
+                    ForEach(sections) { section in
+                        QuotaTimelineAccountPanel(
+                            section: section,
+                            selectedKind: timelineWindow,
+                            chartHeight: chartHeight
+                        ) { chrome in
+                            quotaPanelChromeHeights[section.accountKey] = chrome
+                        }
+                    }
                 }
+                .onHeightChange { quotaGridHeight = $0 }
             }
         }
-        .padding(20)
-        .frame(minHeight: max(0, viewportHeight - 40), alignment: .top)
+    }
+
+    /// 额度页折线图高度：账号面板只有一行时，让最高那个面板的底边落在画布底部；
+    /// 多于一行时页面本来就要滚动，保持下限高度。
+    /// 面板以上的高度 = 整页内容高 − 面板网格高，二者都随折线图同步变化，差值与图高无关。
+    private func quotaTimelineChartHeight(canvasHeight: CGFloat, sections: [QuotaTimelineSection], columns: Int) -> CGFloat {
+        let chrome = sections.compactMap { quotaPanelChromeHeights[$0.accountKey] }.max() ?? 0
+        let above = quotaContentHeight - quotaGridHeight
+        guard sections.count <= columns, quotaGridHeight > 0, above > 0, chrome > 0 else {
+            return Self.quotaTimelineChartMinHeight
+        }
+        let remaining = canvasHeight - 40 - above - chrome
+        return max(Self.quotaTimelineChartMinHeight, remaining.rounded(.down))
     }
 
     // MARK: Sidebar
@@ -499,8 +645,8 @@ struct StatsView: View {
 
     /// 设置里被关闭的服务,其 sidebar 项不再显示;若当前选中了被关闭的服务则回退到全部。
     private func reconcileServiceFilter() {
-        // Cursor Dashboard 没有本机会话 ID；对话页不能伪造或查询 Cursor 对话。
-        if viewMode == .conversations, serviceFilter == .cursor {
+        // Cursor Dashboard 没有本机会话 ID；对话页不能伪造或查询 Cursor 对话，项目页也无法归属。
+        if viewMode == .conversations || viewMode == .projects, serviceFilter == .cursor {
             serviceFilter = .all
             return
         }
@@ -521,6 +667,8 @@ struct StatsView: View {
                         active: serviceFilter == item
                     ) {
                         serviceFilter = item
+                        // 项目 / 对话视图下选 Cursor 立即回退，规则见 reconcileServiceFilter。
+                        reconcileServiceFilter()
                     }
                 }
             }
@@ -543,20 +691,20 @@ struct StatsView: View {
                     viewMode = .conversations
                 }
                 sidebarItem(
-                    english: "Timeline",
-                    chinese: "时间线",
-                    icon: "chart.line.uptrend.xyaxis",
-                    active: viewMode == .timeline
+                    english: "Projects",
+                    chinese: "项目",
+                    icon: "folder",
+                    active: viewMode == .projects
                 ) {
-                    viewMode = .timeline
+                    viewMode = .projects
                 }
                 sidebarItem(
-                    english: "Cycles",
-                    chinese: "周期",
-                    icon: "arrow.triangle.2.circlepath",
-                    active: viewMode == .cycles
+                    english: "Quota",
+                    chinese: "额度",
+                    icon: "gauge.with.needle",
+                    active: viewMode == .quota
                 ) {
-                    viewMode = .cycles
+                    viewMode = .quota
                 }
             }
 
@@ -629,6 +777,17 @@ struct StatsView: View {
 
     private var topBar: some View {
         HStack(spacing: 12) {
+            Text(tr("Overview", "概览"))
+                .font(.system(size: 17, weight: .bold))
+                .kerning(-0.4)
+                .lineLimit(1)
+                .fixedSize()
+            Text(overviewScopeCaption)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
+
             // 扫描提示由后台扫描自行出现 / 消失。它不能当成 HStack 的普通成员夹在
             // Spacer 和两个 Picker 之间——那样每次出现都凭空插入约 170pt,把右对齐的
             // 控件整体推着左右平移。改成让它独占左侧剩余空间并在其中右对齐:视觉上仍
@@ -670,6 +829,21 @@ struct StatsView: View {
             }
     }
 
+    /// 标题旁的口径说明：`全部服务 · 2026-08-30 至 09-28`。
+    private var overviewScopeCaption: String {
+        let service = serviceFilter == .all
+            ? tr("All services", "全部服务")
+            : tr(serviceFilter.englishLabel, serviceFilter.chineseLabel)
+        let period: String
+        if range == .all {
+            period = tr("All time", "全部时间")
+        } else {
+            let (from, to) = rangeBounds
+            period = StatsFormatter.dayRange(from: from, toExclusive: to)
+        }
+        return "\(service) · \(period)"
+    }
+
     /// 切换粒度后，把不属于新粒度的范围收敛到该粒度的第一档；
     /// `.all` / `.custom` 在三个粒度里都在，切换时会原样保留。
     private func reconcileRange() {
@@ -694,13 +868,15 @@ struct StatsView: View {
     private var timelineHeader: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(tr("Quota Timeline", "额度时间线"))
-                    .font(.system(size: 18, weight: .semibold))
+                Text(timelineWindow == .weekly
+                     ? tr("Quota changes this cycle", "本周期的额度变化")
+                     : tr("Quota changes today", "今天的额度变化"))
+                    .font(.system(size: 13, weight: .semibold))
                 Text(tr(
                     "5H shows today. Weekly shows the current and previous quota cycles.",
                     "5小时展示今天；周视图展示当前和上一额度周期。"
                 ))
-                .font(.system(size: 11.5))
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             }
             Spacer()
@@ -719,12 +895,10 @@ struct StatsView: View {
     }
 
     private var timelineSections: [QuotaTimelineSection] {
-        // Cursor / Pi / OpenCode / DSH 没有本地可绘制的额度时间线。
-        guard serviceFilter != .cursor, serviceFilter != .pi, serviceFilter != .opencode,
-              serviceFilter != .dsh else { return [] }
+        let apps = Set(quotaApps)
         var sections: [QuotaTimelineSection] = []
 
-        if serviceFilter != .claude {
+        if apps.contains(.codex) {
             let key = QuotaHistoryAccountKey.codexPrimary(accountId: appState.codexAccount?.accountId)
             var addedPrimaryCodex = false
             if shouldShowTimelineSection(accountKey: key, snapshot: appState.codexQuota, accountExists: appState.codexAccount != nil) {
@@ -752,7 +926,7 @@ struct StatsView: View {
             }
         }
 
-        if serviceFilter != .codex {
+        if apps.contains(.claude) {
             let key = QuotaHistoryAccountKey.claudePrimary(email: appState.claudeAccount?.email)
             if shouldShowTimelineSection(accountKey: key, snapshot: appState.claudeQuota, accountExists: appState.claudeAccount != nil) {
                 sections.append(timelineSection(
@@ -804,6 +978,7 @@ struct StatsView: View {
             kind: kind,
             currentRemaining: sample?.remainingPercent ?? roundedRemaining(snapshotWindow),
             latestSampleAt: sample?.sampledAt,
+            resetsAt: snapshotWindow?.resetsAt,
             periods: QuotaHistoryStore.timelinePeriods(
                 payload: appState.quotaHistory,
                 accountKey: accountKey,
@@ -897,23 +1072,39 @@ struct StatsView: View {
         return (min(from, bounds.from), bounds.to)
     }
 
-    /// 概览全部面板共用的派生结果。输入（聚合 revision、范围、粒度、服务过滤、可见服务）
-    /// 不变时直接复用缓存，悬停、展开、排序、扫描提示等刷新都不会重新聚合日桶。
+    /// 概览全部面板共用的派生结果。输入（日聚合与对话聚合的 revision、范围、粒度、服务过滤、
+    /// 可见服务）不变时直接复用缓存，悬停、展开、切换构成维度、扫描提示等刷新都不会重新聚合。
     private var overviewModel: StatsOverviewModel {
         let aggregator = appState.usageService.aggregator
+        let conversations = appState.usageService.conversationAggregator
         let current = rangeBounds
         let chart = chartBounds
+        let serviceApp = serviceFilter.usageApp
         let input = StatsOverviewInput(
             revision: aggregator.revision,
             current: StatsDateInterval(from: current.from, to: current.to),
             previous: previousRangeBounds.map { StatsDateInterval(from: $0.from, to: $0.to) },
             chart: StatsDateInterval(from: chart.from, to: chart.to),
             granularity: granularity,
-            serviceApp: serviceFilter.usageApp,
+            serviceApp: serviceApp,
             visibleApps: visibleUsageApps,
-            highlightedPeriodStart: chartUsesContextWindow ? selectedPeriodStart : nil
+            highlightedPeriodStart: chartUsesContextWindow ? selectedPeriodStart : nil,
+            conversationRevision: conversations.revision
         )
-        return overviewCache.model(for: input) { aggregator.snapshot() }
+        let apps = Set(visibleUsageApps.filter { serviceApp == nil || $0 == serviceApp })
+        return overviewCache.model(
+            for: input,
+            buckets: { aggregator.snapshot() },
+            conversationOverview: {
+                conversations.overviewBreakdown(ConversationOverviewRequest(
+                    revision: conversations.revision,
+                    from: current.from,
+                    to: current.to,
+                    apps: apps,
+                    topConversationLimit: 5
+                ))
+            }
+        )
     }
 
     private var cursorUsageIsInCurrentScope: Bool {
@@ -922,9 +1113,9 @@ struct StatsView: View {
     }
 
     /// 当前范围外的历史由 Stats 选择时按月静默补拉；All 没有可靠的远端起点，
-    /// 所以只使用现有缓存，绝不偷偷发起无界回溯。
+    /// 所以只使用现有缓存，绝不偷偷发起无界回溯。项目页的「未归属」也包含 Cursor，同样补拉。
     private var cursorHistoryRequest: CursorHistoryRequest? {
-        guard viewMode == .overview,
+        guard viewMode == .overview || viewMode == .projects,
               cursorUsageIsInCurrentScope,
               range != .all,
               let accountID = appState.cursorAccount?.userID
@@ -934,6 +1125,50 @@ struct StatsView: View {
         let requested = previousRangeBounds.map { $0.from..<current.to } ?? current.from..<current.to
         guard !appState.usageService.isCursorRemoteUsageCovered(requested) else { return nil }
         return CursorHistoryRequest(accountID: accountID, from: requested.lowerBound, to: requested.upperBound)
+    }
+}
+
+/// 概览、项目页并排的两块：宽画布按比例左右排，窄画布上下排。两块等高。
+/// `minHeight` 只在宽画布生效：整排至少这么高（内容更高时照常撑开），面板里的弹性区块（如柱状图）随之变高。
+struct StatsSplitRow<Leading: View, Trailing: View>: View {
+    let isWide: Bool
+    let width: CGFloat
+    let leadingFraction: CGFloat
+    var minHeight: CGFloat? = nil
+    @ViewBuilder var leading: () -> Leading
+    @ViewBuilder var trailing: () -> Trailing
+
+    private let spacing: CGFloat = 12
+
+    var body: some View {
+        if isWide {
+            HStack(alignment: .top, spacing: spacing) {
+                leading()
+                    .frame(width: max(0, ((width - spacing) * leadingFraction).rounded(.down)))
+                    .frame(minHeight: minHeight, maxHeight: .infinity, alignment: .top)
+                trailing()
+                    .frame(maxWidth: .infinity, minHeight: minHeight, maxHeight: .infinity, alignment: .top)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        } else {
+            VStack(alignment: .leading, spacing: spacing) {
+                leading()
+                trailing()
+            }
+        }
+    }
+}
+
+extension View {
+    /// 报告自身布局高度（出现时与每次变化时），用于统计页按画布高度分配一屏空间。
+    func onHeightChange(_ action: @escaping (CGFloat) -> Void) -> some View {
+        background(
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { action(proxy.size.height) }
+                    .onChange(of: proxy.size.height) { _, height in action(height) }
+            }
+        )
     }
 }
 
@@ -1062,8 +1297,8 @@ private struct OverviewKPIRow: View {
                 dimmed: false
             )
             KPICard(
-                english: "Total spend",
-                chinese: "总花费",
+                english: "Cost",
+                chinese: "费用",
                 value: StatsFormatter.tierCost(
                     model.totalsAll.costUSD,
                     hasUnpricedUsage: model.totalsAll.hasUnpricedUsage,
@@ -1116,17 +1351,107 @@ private struct OverviewKPIRow: View {
 private struct OverviewTokenBreakdownPanel: View {
     let model: StatsOverviewModel
 
+    /// 命中率大数字用深一档的绿：系统绿在 24pt 大字上过亮。
+    private static let hitRateColor = adaptiveColor(light: (30, 127, 58), dark: (48, 209, 88)) // #1E7F3A / #30D158
+
     var body: some View {
-        Panel(title: "Token breakdown", chinese: "Token 拆分") {
-            VStack(alignment: .leading, spacing: 12) {
-                // 隐藏 hero:总 Tokens 与 KPI 卡 1 重复;分项使用横排图例。
-                TokenBreakdownView(totals: model.totalsAll, showsHero: false)
-                if model.speedAll.fast.requestCount > 0 {
+        let totals = model.totalsAll
+        Panel(title: "Token breakdown", chinese: "Token 拆分", fillHeight: true) {
+            // 不放总 Tokens：与 KPI 卡 1 重复。命中率做大数字，三类分项逐行列出并带占比，
+            // Fast 一行贴面板底部。
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(Self.hitRatePercent(totals.cacheHitRate))
+                        .font(.system(size: 24, weight: .semibold))
+                        .kerning(-0.5)
+                        .monospacedDigit()
+                        .foregroundStyle(Self.hitRateColor)
+                    Text(tr("Cache hit rate", "缓存命中率"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                TokenStackBar(totals: totals)
+                    .padding(.top, 12)
+
+                VStack(spacing: 0) {
+                    categoryRow(tr("Input", "输入"), tokens: totals.inputTokens, dot: TokenCategoryStyle.input, totals: totals)
                     Divider()
-                    FastUsageSummaryView(breakdown: model.speedAll)
+                    categoryRow(tr("Output", "输出"), tokens: totals.outputTokens, dot: TokenCategoryStyle.output, totals: totals)
+                    Divider()
+                    categoryRow(tr("Cache hit", "缓存命中"), tokens: totals.cacheReadTokens, dot: TokenCategoryStyle.cacheRead, totals: totals)
+                }
+                .padding(.top, 10)
+
+                Spacer(minLength: 0)
+
+                if model.speedAll.fast.requestCount > 0 {
+                    fastLine(model.speedAll)
+                        .padding(.top, 12)
                 }
             }
         }
+    }
+
+    /// 占比分母与堆叠条一致：输入 + 输出 + 缓存命中。
+    private func categoryRow(_ label: String, tokens: Int, dot: Double, totals: UsageTotals) -> some View {
+        let denominator = totals.inputTokens + totals.outputTokens + totals.cacheReadTokens
+        return HStack(spacing: 8) {
+            Circle()
+                .fill(Color.primary.opacity(dot))
+                .frame(width: 8, height: 8)
+            Text(label)
+                .font(.system(size: 12))
+            Spacer(minLength: 8)
+            Text(StatsFormatter.compactToken(tokens))
+                .font(.system(size: 12.5, weight: .semibold))
+                .monospacedDigit()
+            Text(Self.sharePercent(denominator > 0 ? Double(tokens) / Double(denominator) : 0))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 48, alignment: .trailing)
+        }
+        .padding(.vertical, 7)
+    }
+
+    /// Fast 一行：原始 Tokens · 计费等效 Tokens · 估算费用。
+    private func fastLine(_ breakdown: UsageSpeedBreakdown) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider()
+            HStack(spacing: 6) {
+                Image(systemName: "bolt")
+                    .font(.system(size: 10, weight: .medium))
+                Text(tr(
+                    "Fast \(StatsFormatter.compactToken(breakdown.fast.totalTokens)) · equiv. \(StatsFormatter.billingEquivalentTokens(breakdown)) · \(fastCost(breakdown))",
+                    "Fast \(StatsFormatter.compactToken(breakdown.fast.totalTokens)) · 等效 \(StatsFormatter.billingEquivalentTokens(breakdown)) · \(fastCost(breakdown))"
+                ))
+                .font(.system(size: 11))
+                .monospacedDigit()
+                .lineLimit(1)
+            }
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func fastCost(_ breakdown: UsageSpeedBreakdown) -> String {
+        StatsFormatter.tierCost(
+            breakdown.fast.costUSD,
+            hasUnpricedUsage: breakdown.fastHasUnpricedCost,
+            costIncomplete: breakdown.fast.costIncomplete
+        )
+    }
+
+    /// 命中率保留一位小数（如 `72.1%`）。
+    private static func hitRatePercent(_ rate: Double) -> String {
+        String(format: "%.1f%%", max(0, min(1, rate)) * 100)
+    }
+
+    /// 分项占比保留一位小数；非零但不足 0.1% 显示 `<0.1%`。
+    private static func sharePercent(_ ratio: Double) -> String {
+        guard ratio.isFinite, ratio > 0 else { return "0%" }
+        let value = ratio * 100
+        return value < 0.1 ? "<0.1%" : String(format: "%.1f%%", min(100, value))
     }
 }
 
@@ -1159,7 +1484,8 @@ private struct OverviewUsageChartPanel: View {
                         LegendChip(color: app.tintColor, label: app.displayName)
                     }
                 }
-            )
+            ),
+            fillHeight: true
         ) {
             VStack(spacing: 6) {
                 if model.samples.isEmpty {
@@ -1204,17 +1530,6 @@ private struct OverviewUsageChartPanel: View {
                 RuleMark(x: .value("Period", selected.key))
                     .foregroundStyle(Color.secondary.opacity(0.25))
                     .lineStyle(StrokeStyle(lineWidth: 1))
-                    .annotation(
-                        position: .top,
-                        spacing: 6,
-                        overflowResolution: .init(x: .fit(to: .plot), y: .disabled)
-                    ) {
-                        DailyTooltip(
-                            sample: selected,
-                            visibleApps: apps,
-                            granularity: granularity
-                        )
-                    }
             }
         }
         .chartXSelection(value: $selectedPeriodKey)
@@ -1222,25 +1537,66 @@ private struct OverviewUsageChartPanel: View {
         // X 轴标签自绘：类别很多（长范围日粒度）时内建 AxisMarks 的标签会叠成一片，
         // 所以隐藏内建轴，按绘图区宽度自己抽取刻度并定位到对应柱心。
         .chartXAxis(.hidden)
-        .chartYAxis(.hidden)
+        // 图表随画布变高后，没有刻度就读不出量级：左侧 3~4 条 Tokens 刻度 + 浅网格线。
+        .chartYAxis {
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+                AxisGridLine()
+                    .foregroundStyle(Color.secondary.opacity(0.18))
+                AxisValueLabel {
+                    if let tokens = value.as(Double.self) {
+                        Text(StatsFormatter.compactToken(Int(tokens)))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
         .chartOverlay(alignment: .topLeading) { proxy in
             GeometryReader { geo in
                 if let plotFrame = proxy.plotFrame {
-                    xAxisLabels(proxy: proxy, plot: geo[plotFrame])
+                    let plot = geo[plotFrame]
+                    ZStack(alignment: .topLeading) {
+                        xAxisLabels(proxy: proxy, plot: plot)
+                        if let selected {
+                            tooltip(for: selected, apps: apps, proxy: proxy, plot: plot, chartSize: geo.size)
+                        }
+                    }
                 }
             }
             .allowsHitTesting(false)
         }
         .padding(.bottom, Self.axisLabelAreaHeight)
-        .frame(height: 160)
+        // 理想高 200pt；宽画布下所在一排被拉高时（见 `StatsView.overviewUsageRowMinHeight`）随之变高。
+        .frame(minHeight: 180, idealHeight: 200, maxHeight: .infinity)
     }
 
-    /// 标签区高度（含 6pt 上间距），从图表 160pt 总高里让出，绘图区相应变矮。
+    /// 标签区高度（含 6pt 上间距），从图表总高里让出，绘图区相应变矮。
     private static let axisLabelAreaHeight: CGFloat = 18
     /// 相邻标签的最小间距；绘图区越宽标签越多，窄时至少保留首尾附近 2 个。
     private static let minAxisLabelSpacing: CGFloat = 80
     /// 单个标签的占位宽度，首尾标签据此收进绘图区内，不被面板边缘截断。
     private static let axisLabelSlotWidth: CGFloat = 64
+
+    /// 悬浮明细贴在选中柱的右侧，右侧放不下时翻到左侧，垂直居中于图表。
+    /// 卡片比图表高时也只在上下对称溢出，不再像 `.top` annotation 那样整体伸出图表上方被外层裁掉。
+    @ViewBuilder
+    private func tooltip(
+        for sample: DailySample,
+        apps: [UsageApp],
+        proxy: ChartProxy,
+        plot: CGRect,
+        chartSize: CGSize
+    ) -> some View {
+        if let x = proxy.position(forX: sample.key) {
+            let gap = model.barWidth / 2 + 10
+            let centerX = plot.minX + x
+            let fitsRight = centerX + gap + DailyTooltip.width <= plot.maxX
+            let left = fitsRight ? centerX + gap : max(0, centerX - gap - DailyTooltip.width)
+            DailyTooltip(sample: sample, visibleApps: apps, granularity: granularity)
+                .offset(x: left)
+                .frame(width: chartSize.width, height: chartSize.height, alignment: .leading)
+        }
+    }
 
     private func xAxisLabels(proxy: ChartProxy, plot: CGRect) -> some View {
         let maxCount = max(2, Int(plot.width / Self.minAxisLabelSpacing))
@@ -1276,291 +1632,498 @@ private struct OverviewUsageChartPanel: View {
     }
 }
 
-// MARK: By service panel
+// MARK: Composition panel（用量构成）
 
-/// 服务数 ≤ 3 时单行排列;超过 3 个(全开时 4 个)改两列网格,
-/// 每列占半行宽、两两对齐铺满。
-private struct OverviewByServicePanel: View {
-    let model: StatsOverviewModel
-
-    var body: some View {
-        Panel(title: "By service", chinese: "按服务") {
-            if model.visibleApps.isEmpty {
-                placeholderHeight(
-                    60,
-                    message: tr("No services selected · enable in Settings → Services & Accounts", "未选择任何服务 · 到「设置 → 服务与账号」开启")
-                )
-            } else if model.visibleApps.count > 3 {
-                LazyVGrid(
-                    columns: [
-                        GridItem(.flexible(), spacing: 16),
-                        GridItem(.flexible(), spacing: 16)
-                    ],
-                    alignment: .leading,
-                    spacing: 16
-                ) {
-                    ForEach(model.visibleApps, id: \.self) { app in
-                        serviceRow(for: app)
-                    }
-                }
-            } else {
-                HStack(alignment: .top, spacing: 16) {
-                    ForEach(model.visibleApps, id: \.self) { app in
-                        serviceRow(for: app)
-                    }
-                }
-            }
-        }
-    }
-
-    private func serviceRow(for app: UsageApp) -> some View {
-        let totals = model.totals(app)
-        return ByServiceRow(
-            title: app.displayName,
-            subtitle: serviceSubtitle(app),
-            app: app,
-            value: Decimal(totals.totalTokens),
-            totalValue: Decimal(model.totalsAll.totalTokens),
-            totals: totals,
-            speed: model.speed(app)
-        )
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func serviceSubtitle(_ app: UsageApp) -> String {
-        switch app {
-        case .codex: return "OpenAI"
-        case .claude: return "Anthropic"
-        case .cursor: return "Cursor"
-        case .pi: return "pi.dev"
-        case .opencode: return "opencode.ai"
-        case .dsh: return "DeepSeek Harness"
+extension CompositionDimension {
+    @MainActor
+    var label: String {
+        switch self {
+        case .service: return tr("Service", "服务")
+        case .provider: return tr("Provider", "提供商")
+        case .model: return tr("Model", "模型")
+        case .project: return tr("Project", "项目")
         }
     }
 }
 
-// MARK: By model panel(保留旧的按模型聚合)
-
-private struct OverviewByModelPanel: View {
+/// 替代原「按服务 / 按提供商 / 按模型」三个面板：一条占比条 + 一张按 API 等值排序的列表，
+/// 维度在面板标题右侧切换。列表末列为缓存命中率；输入 / 输出 / 缓存读取明细见 Token 拆分面板。
+private struct OverviewCompositionPanel: View {
     let model: StatsOverviewModel
-    let serviceFilter: StatsServiceFilter
-
-    var body: some View {
-        Panel(title: "By model", chinese: "按模型") {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(Array(model.visibleApps.enumerated()), id: \.element) { index, app in
-                    if index > 0 {
-                        Divider()
-                    }
-                    if showsModelGroup(app) {
-                        modelGroup(app: app, rows: model.modelRows(app))
-                    }
-                }
-            }
-        }
-    }
-
-    /// 单服务过滤时只显示该服务的模型组;「全部」时显示所有可见服务。
-    private func showsModelGroup(_ app: UsageApp) -> Bool {
-        guard let filter = serviceFilter.usageApp else { return true }
-        return filter == app
-    }
-
-    private func modelGroup(app: UsageApp, rows: [ModelRow]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                ServiceTile(app: app, size: 12)
-                Text(app.displayName.uppercased())
-                    .font(.system(size: 10, weight: .semibold))
-                    .kerning(0.4)
-                    .foregroundStyle(.tertiary)
-            }
-            if rows.isEmpty {
-                Text(tr("No data", "无数据"))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 12)
-            } else {
-                ForEach(rows) { row in
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack {
-                            Text(row.model)
-                                .font(.system(size: 12.5))
-                            Spacer()
-                            Text("\(StatsFormatter.compactToken(row.totals.totalTokens)) Tokens")
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .foregroundStyle(.primary)
-                                .monospacedDigit()
-                            Text(StatsFormatter.tierCost(
-                                row.totals.costUSD,
-                                hasUnpricedUsage: row.totals.hasUnpricedUsage,
-                                costIncomplete: row.totals.costIncomplete
-                            ))
-                                .font(.system(size: 12.5, weight: .semibold))
-                                .monospacedDigit()
-                        }
-                        TokenBreakdownInlineRow(totals: row.totals)
-                        if row.speed.fast.requestCount > 0 {
-                            FastUsageInlineRow(breakdown: row.speed)
-                        }
-                    }
-                    .padding(.leading, 12)
-                }
-            }
-        }
-    }
-}
-
-// MARK: By provider panel(按模型提供商,跨服务归并)
-
-/// 按提供商查看 token 与费用：所有有数据的提供商平铺一行一眼可见；
-/// 右上角四档排序（费用 / Tokens / 请求数 / 名称，`other` 恒排最后）；
-/// 点击行就地展开该提供商全部数据（Token 拆分 + 来源服务 + 按模型明细）。
-/// 排序键由 StatsView 持有（切到时间线等视图再回来仍保留），展开状态随范围 / 粒度 / 服务切换收起。
-private struct OverviewByProviderPanel: View {
-    let model: StatsOverviewModel
-    @Binding var sort: ProviderSort
     let scope: StatsOverviewScope
+    let onSelectService: (UsageApp) -> Void
+    let navigate: (StatsNavigationRequest.Target) -> Void
 
+    @State private var dimension: CompositionDimension = .service
     @State private var expandedProvider: ModelProvider?
 
     var body: some View {
-        Panel(title: "By provider", chinese: "按提供商", right: AnyView(
-            Picker("", selection: $sort) {
-                ForEach(ProviderSort.allCases) { item in Text(item.label).tag(item) }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .fixedSize()
-            .help(tr("Sort by cost / tokens / requests / name", "按费用 / Tokens / 请求数 / 名称排序"))
-        )) {
-            let groups = ProviderGroup.sorted(model.providerGroups, by: sort)
-            if groups.isEmpty {
-                placeholderHeight(60, message: tr("No data", "无数据"))
+        let rows = model.composition[dimension] ?? []
+        Panel(
+            title: "Usage composition",
+            chinese: "用量构成",
+            right: AnyView(
+                SegmentedBar(
+                    items: CompositionDimension.allCases,
+                    label: { $0.label },
+                    selection: $dimension
+                )
+            ),
+            fillHeight: true
+        ) {
+            if rows.isEmpty || !model.totalsAll.hasUsage {
+                placeholderHeight(120, message: emptyMessage)
             } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(groups) { group in
-                        providerRow(group)
-                        if group.id != groups.last?.id {
-                            Divider().padding(.vertical, 6)
+                VStack(alignment: .leading, spacing: 10) {
+                    CompositionShareBar(segments: rows.map {
+                        CompositionShareBar.Segment(id: $0.id, role: $0.color, share: model.share(of: $0.totals))
+                    }, height: 8)
+
+                    VStack(spacing: 0) {
+                        columnHeader
+                        ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                            if index > 0 { Divider() }
+                            rowView(row)
+                        }
+                    }
+
+                    // 合计行贴面板底部：行数少（如只有 3 个服务）时留白落在列表与合计之间，面板仍收得住。
+                    Spacer(minLength: 0)
+
+                    VStack(spacing: 10) {
+                        Divider()
+                        HStack(spacing: 8) {
+                            Text(tr(
+                                "Total \(StatsFormatter.compactToken(model.totalsAll.totalTokens)) tokens · \(StatsFormatter.cost(model.totalsAll.costUSD)) cost",
+                                "合计 \(StatsFormatter.compactToken(model.totalsAll.totalTokens)) Tokens · 费用 \(StatsFormatter.cost(model.totalsAll.costUSD))"
+                            ))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            Spacer(minLength: 8)
+                            if dimension == .project {
+                                StatsLinkButton(title: tr("All projects ›", "全部项目 ›")) {
+                                    navigate(.projectsList)
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        .onChange(of: scope) { _, _ in expandedProvider = nil }
+        .onChange(of: scope) { _, _ in
+            expandedProvider = nil
+        }
+        .onChange(of: dimension) { _, _ in
+            expandedProvider = nil
+        }
     }
 
-    private func providerRow(_ group: ProviderGroup) -> some View {
-        let isExpanded = expandedProvider == group.provider
-        return VStack(alignment: .leading, spacing: 0) {
-            Button {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    expandedProvider = isExpanded ? nil : group.provider
+    /// 列名行，列宽与 `rowContent` 一致。
+    private var columnHeader: some View {
+        HStack(spacing: 8) {
+            Color.clear.frame(width: 8, height: 1)
+            Text(dimension.label)
+            Spacer(minLength: 8)
+            Text(tr("Share", "占比")).frame(width: 46, alignment: .trailing)
+            Text("Tokens").frame(width: 86, alignment: .trailing)
+            Text(tr("Cost", "费用")).frame(width: 86, alignment: .trailing)
+            Text(tr("Cache hit", "缓存命中率")).frame(width: 64, alignment: .trailing)
+            Color.clear.frame(width: 10, height: 1)
+        }
+        .font(.system(size: 10.5))
+        .foregroundStyle(.tertiary)
+        .padding(.bottom, 4)
+    }
+
+    private var emptyMessage: String {
+        if dimension == .service, model.visibleApps.isEmpty {
+            return tr("No services selected · enable in Settings → Services & Accounts", "未选择任何服务 · 到「设置 → 服务与账号」开启")
+        }
+        return tr("No data", "无数据")
+    }
+
+    @ViewBuilder
+    private func rowView(_ row: CompositionRow) -> some View {
+        let isExpanded: Bool = {
+            if case .expandProvider(let provider) = row.action { return expandedProvider == provider }
+            return false
+        }()
+        VStack(alignment: .leading, spacing: 0) {
+            Group {
+                if row.action == .none {
+                    rowContent(row, isExpanded: isExpanded)
+                } else {
+                    Button { perform(row.action) } label: {
+                        rowContent(row, isExpanded: isExpanded)
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
                 }
-            } label: {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(Color.secondary.opacity(0.45))
-                        .frame(width: 8, height: 8)
-                    Text(group.provider.displayName)
-                        .font(.system(size: 12.5, weight: .semibold))
-                    Spacer()
-                    Text("\(StatsFormatter.compactToken(group.totals.totalTokens)) Tokens")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(.primary)
-                    Text(StatsFormatter.tierCost(
-                        group.totals.costUSD,
-                        hasUnpricedUsage: group.totals.hasUnpricedUsage,
-                        costIncomplete: group.totals.costIncomplete
-                    ))
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .monospacedDigit()
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 10)
-                }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .pointingHandCursor()
 
             if isExpanded {
-                providerDetail(group)
-                    .padding(.leading, 16)
-                    .padding(.top, 10)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(row.providerModels) { item in
+                        providerModelRow(item)
+                    }
+                }
+                .padding(.leading, 16)
+                .padding(.bottom, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .padding(.vertical, 7)
     }
 
-    /// 展开后的提供商全部数据：整体 Token 拆分 + 来源服务 + 按模型明细。
-    private func providerDetail(_ group: ProviderGroup) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            TokenBreakdownView(totals: group.totals, showsHero: false)
-
-            if group.sources.count > 1 || !group.models.isEmpty {
-                HStack(spacing: 6) {
-                    Text(tr("Sources", "来源"))
-                        .font(.system(size: 10))
+    private func rowContent(_ row: CompositionRow, isExpanded: Bool) -> some View {
+        let isSecondary = row.kind != .item
+        return HStack(spacing: 8) {
+            CompositionSwatch(role: row.color, size: 8)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title(for: row))
+                    .font(.system(size: 12.5, weight: isSecondary ? .regular : .semibold))
+                    .foregroundStyle(isSecondary ? Color.secondary : Color.primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !subtitle(for: row).isEmpty {
+                    Text(subtitle(for: row))
+                        .font(.system(size: 10.5))
                         .foregroundStyle(.tertiary)
-                    ForEach(UsageApp.allCases.filter { group.sources.contains($0) }, id: \.self) { app in
-                        HStack(spacing: 4) {
-                            ServiceTile(app: app, size: 12)
-                            Text(app.displayName)
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    if group.sources.count > 1 {
-                        Text("· \(group.totals.requestCount) \(tr("requests", "次请求"))")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                    }
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
-
-            if !group.models.isEmpty {
-                Divider()
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(group.models) { row in
-                        providerModelRow(row)
-                    }
+            Spacer(minLength: 8)
+            Text(StatsFormatter.percent(model.share(of: row.totals)))
+                .font(.system(size: 12, weight: .semibold))
+                .monospacedDigit()
+                .frame(width: 46, alignment: .trailing)
+            Text("\(StatsFormatter.compactToken(row.totals.totalTokens))")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 86, alignment: .trailing)
+            Text(StatsFormatter.tierCost(
+                row.totals.costUSD,
+                hasUnpricedUsage: row.totals.hasUnpricedUsage,
+                costIncomplete: row.totals.costIncomplete
+            ))
+            .font(.system(size: 12.5, weight: .semibold))
+            .monospacedDigit()
+            .frame(width: 86, alignment: .trailing)
+            Text(hitRateText(row.totals.cacheHitRate))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 64, alignment: .trailing)
+            Group {
+                switch row.action {
+                case .expandProvider:
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                case .openProject, .openUnattributed:
+                    Image(systemName: "chevron.right")
+                case .selectService, .none:
+                    Color.clear
                 }
             }
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(.tertiary)
+            .frame(width: 10, height: 10)
         }
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
     }
 
     private func providerModelRow(_ row: ProviderModelRow) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                ServiceTile(app: row.app, size: 12)
-                Text(row.model)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 8)
-                Text("\(StatsFormatter.compactToken(row.totals.totalTokens)) Tokens")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .monospacedDigit()
-                Text(StatsFormatter.tierCost(
-                    row.totals.costUSD,
-                    hasUnpricedUsage: row.totals.hasUnpricedUsage,
-                    costIncomplete: row.totals.costIncomplete
-                ))
-                    .font(.system(size: 12, weight: .semibold))
-                    .monospacedDigit()
+        HStack(spacing: 6) {
+            ServiceTile(app: row.app, size: 12)
+            Text(row.model)
+                .font(.system(size: 11.5, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            Text("\(StatsFormatter.compactToken(row.totals.totalTokens)) Tokens")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Text(StatsFormatter.tierCost(
+                row.totals.costUSD,
+                hasUnpricedUsage: row.totals.hasUnpricedUsage,
+                costIncomplete: row.totals.costIncomplete
+            ))
+            .font(.system(size: 11.5, weight: .semibold))
+            .monospacedDigit()
+            .frame(width: 86, alignment: .trailing)
+            Color.clear.frame(width: 64 + 6, height: 1)
+            Color.clear.frame(width: 10, height: 1)
+        }
+    }
+
+    private func title(for row: CompositionRow) -> String {
+        switch row.kind {
+        case .item:
+            return row.title
+        case .rest(let count):
+            switch dimension {
+            case .service, .provider: return tr("Other", "其他")
+            case .model: return tr("\(count) other models", "其余 \(count) 个模型")
+            case .project: return tr("\(count) other projects", "其余 \(count) 个项目")
             }
-            TokenBreakdownInlineRow(totals: row.totals)
-                .padding(.leading, 12)
-            if row.speed.fast.requestCount > 0 {
-                FastUsageInlineRow(breakdown: row.speed)
-                    .padding(.leading, 12)
+        case .unattributed:
+            return tr("Unattributed", "未归属")
+        }
+    }
+
+    /// 未归属的说明原先是面板底部单独一行，现在并入该行副标。
+    private func subtitle(for row: CompositionRow) -> String {
+        guard row.kind == .unattributed else { return row.subtitle }
+        return tr(
+            "Cursor remote, backfilled and early history have no project info",
+            "Cursor 远端用量、补录和早期历史，没有项目信息"
+        )
+    }
+
+    private func perform(_ action: CompositionAction) {
+        switch action {
+        case .none:
+            break
+        case .selectService(let app):
+            onSelectService(app)
+        case .expandProvider(let provider):
+            withAnimation(.easeOut(duration: 0.18)) {
+                expandedProvider = expandedProvider == provider ? nil : provider
+            }
+        case .openProject(let key):
+            navigate(.project(key))
+        case .openUnattributed:
+            navigate(.unattributed)
+        }
+    }
+}
+
+// MARK: Top conversations panel（高消耗对话）
+
+private struct OverviewTopConversationsPanel: View {
+    let model: StatsOverviewModel
+    let navigate: (StatsNavigationRequest.Target) -> Void
+
+    var body: some View {
+        let rows = model.topConversations
+        Panel(
+            title: "Top conversations",
+            chinese: "高消耗对话",
+            right: AnyView(
+                HStack(spacing: 10) {
+                    if let share = model.topConversationsCostShare {
+                        Text(tr(
+                            "Top \(rows.count) = \(StatsFormatter.percent(share)) of cost",
+                            "前 \(rows.count) 个占费用 \(StatsFormatter.percent(share))"
+                        ))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                    }
+                    StatsLinkButton(title: tr("All conversations ›", "全部对话 ›")) {
+                        navigate(.conversationsByCost)
+                    }
+                }
+            ),
+            fillHeight: true
+        ) {
+            if rows.isEmpty {
+                placeholderHeight(120, message: tr(
+                    "No local conversations in this range",
+                    "该范围内没有本机对话"
+                ))
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                        if index > 0 { Divider() }
+                        TopConversationRowView(
+                            index: index,
+                            row: row,
+                            share: model.share(of: row.summary.totals),
+                            barRatio: barRatio(row, first: rows.first),
+                            roomy: true
+                        ) {
+                            navigate(.conversation(row.id))
+                        }
+                    }
+                }
             }
         }
+    }
+
+    private func barRatio(_ row: TopConversationRow, first: TopConversationRow?) -> Double {
+        guard let top = first?.summary.costs.total, top > 0 else { return 0 }
+        return NSDecimalNumber(decimal: row.summary.costs.total / top).doubleValue
+    }
+}
+
+/// 高消耗对话的一行，概览与项目页共用。
+struct TopConversationRowView: View {
+    let index: Int
+    let row: TopConversationRow
+    /// 占概览 / 项目 API 等值的比例。
+    let share: Double
+    /// 金额条长度，按第一名归一。
+    let barRatio: Double
+    var showsProject = true
+    /// 概览用：金额条移到标题下方铺满文字列、行距加大，5 行正好填满概览下排。
+    var roomy = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Text("\(index + 1)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 14, alignment: .trailing)
+                ServiceMark(color: row.summary.info.app.tintColor, size: 10)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.summary.info.title ?? tr("Untitled", "（无标题）"))
+                        .font(.system(size: 12.5, weight: .medium))
+                        .lineLimit(1)
+                    Text(metaLine)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if roomy {
+                        GeometryReader { proxy in
+                            amountBar(width: proxy.size.width, height: 3)
+                        }
+                        .frame(height: 3)
+                        .padding(.top, 4)
+                    }
+                }
+                Spacer(minLength: 8)
+                if !roomy {
+                    amountBar(width: 72, height: 4)
+                }
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(StatsFormatter.cost(row.summary.costs.total))
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .monospacedDigit()
+                    Text("\(StatsFormatter.compactToken(row.summary.totals.totalTokens)) · \(StatsFormatter.percent(share))")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                .frame(minWidth: 96, alignment: .trailing)
+            }
+            .padding(.vertical, roomy ? 11 : 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+    }
+
+    /// 金额条：长度按第一名归一。
+    private func amountBar(width: CGFloat, height: CGFloat) -> some View {
+        ZStack(alignment: .leading) {
+            Capsule().fill(Color.secondary.opacity(0.12))
+            Capsule()
+                .fill(CompositionPalette.amountBar)
+                .frame(width: width * max(0, min(1, barRatio)))
+        }
+        .frame(width: width, height: height)
+    }
+
+    private var metaLine: String {
+        var parts: [String] = []
+        if showsProject {
+            parts.append(StatsProjectLabel.name(row.project))
+        }
+        if let branch = row.summary.info.gitBranch, !branch.isEmpty { parts.append(branch) }
+        parts.append(StatsFormatter.day(row.summary.rangeLastAt))
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// 统计页项目名称的统一文案（无明确项目 / 系统任务不用路径名）。
+enum StatsProjectLabel {
+    @MainActor
+    static func name(_ project: StatsProjectIdentity) -> String {
+        switch project.status {
+        case .unassigned: return tr("No project", "无明确项目")
+        case .system: return tr("CCBar system tasks", "CCBar 系统任务")
+        case .available, .unavailable, .unverified: return project.name
+        }
+    }
+}
+
+// MARK: Composition primitives（概览与项目页共用）
+
+/// 按配色角色填充：服务识别色 / 紫色色阶 / 其余灰 / 未归属斜纹。
+struct CompositionFill: View {
+    let role: CompositionColorRole
+
+    var body: some View {
+        switch role {
+        case .service(let app): app.tintColor
+        case .rank(let index): CompositionPalette.rank(index)
+        case .rest: CompositionPalette.rest
+        case .unattributed: UnattributedStripes()
+        }
+    }
+}
+
+/// 行首色块（≤12pt，圆角 2pt）。
+struct CompositionSwatch: View {
+    let role: CompositionColorRole
+    var size: CGFloat = 8
+
+    var body: some View {
+        CompositionFill(role: role)
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
+    }
+}
+
+/// 6pt 占比条：按行依次拼接，段间 2pt；占比按总和归一，舍入误差不会让条溢出。
+struct CompositionShareBar: View {
+    struct Segment {
+        let id: String
+        let role: CompositionColorRole
+        let share: Double
+    }
+
+    let segments: [Segment]
+    var height: CGFloat = 6
+
+    var body: some View {
+        GeometryReader { proxy in
+            let visible = segments.filter { $0.share > 0 }
+            let total = visible.reduce(0) { $0 + $1.share }
+            let spacing: CGFloat = 2
+            let available = max(0, proxy.size.width - spacing * CGFloat(max(0, visible.count - 1)))
+            HStack(spacing: spacing) {
+                ForEach(visible, id: \.id) { segment in
+                    CompositionFill(role: segment.role)
+                        .frame(width: total > 0 ? max(1, available * segment.share / total) : 0)
+                        .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
+                }
+            }
+        }
+        .frame(height: height)
+    }
+}
+
+/// 面板标题右侧的文字链接（「全部对话 ›」等）。
+struct StatsLinkButton: View {
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 }
 
@@ -1593,6 +2156,8 @@ private struct Panel<Content: View>: View {
     let title: String
     let chinese: String
     var right: AnyView? = nil
+    /// 并排的两块面板等高：由外层 `StatsSplitRow` 给高度，面板背景撑满。
+    var fillHeight = false
     @ViewBuilder var content: () -> Content
 
     var body: some View {
@@ -1606,7 +2171,7 @@ private struct Panel<Content: View>: View {
             content()
         }
         .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: fillHeight ? .infinity : nil, alignment: .topLeading)
         .ccPanel(cornerRadius: 12)
     }
 }
@@ -1680,7 +2245,7 @@ private struct SegmentedBar<Item: Hashable>: View {
 
     private func segmentText(_ text: String, isActive: Bool) -> some View {
         Text(text)
-            .font(.system(size: 13))
+            .font(.system(size: 11.5))
             .lineLimit(1)
             // 骨架已保证每段不窄于最长文案,这里只是兜底,防止窗口被压到极窄时截成省略号。
             .minimumScaleFactor(0.85)
@@ -1701,7 +2266,7 @@ private struct SegmentedBar<Item: Hashable>: View {
             segmentLabel(item, isActive: isActive)
                 .padding(.horizontal, 10)
                 .frame(maxWidth: stretch ? .infinity : nil)
-                .frame(height: 22)
+                .frame(height: 20)
                 .background(
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
                         .fill(isActive ? Color.accentColor : Color.clear)
@@ -1727,6 +2292,8 @@ private struct SegmentedBar<Item: Hashable>: View {
 
 /// 用量柱状图的悬浮浮层:展示该周期内各服务花费、合计花费与合计 tokens。
 private struct DailyTooltip: View {
+    static let width: CGFloat = 200
+
     let sample: DailySample
     let visibleApps: [UsageApp]
     let granularity: StatsGranularity
@@ -1763,7 +2330,7 @@ private struct DailyTooltip: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .frame(width: 200, alignment: .leading)
+        .frame(width: Self.width, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .ccPanelStroke(cornerRadius: 8)
@@ -1800,15 +2367,14 @@ private struct DailyTooltip: View {
 
 // MARK: - KPI card
 
-private struct KPICard: View {
+/// 统计页 KPI 卡，概览与项目页共用。
+struct KPICard: View {
     let english: String
     let chinese: String
     let value: String
     let delta: Double?
     let app: UsageApp?
     let dimmed: Bool
-
-    private var tint: Color? { app?.tintColor }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -1831,11 +2397,12 @@ private struct KPICard: View {
                         .lineLimit(1)
                 }
             }
+            // 主值统一 primary；服务识别色只留在标签前的 12pt tile 上（设计风格 §4.2）。
             Text(value)
                 .font(.system(size: 22, weight: .semibold))
                 .kerning(-0.5)
                 .monospacedDigit()
-                .foregroundStyle(tint ?? .primary)
+                .foregroundStyle(.primary)
                 .lineLimit(1)
         }
         .padding(.vertical, 11)
@@ -1868,51 +2435,37 @@ private enum TokenCategoryStyle {
 /// 缓存写入(创建)不展示——量级小、Codex 协议也不上报,详见与用户的讨论。
 struct TokenBreakdownView: View {
     let totals: UsageTotals
-    /// 概览面板传 false:总 Tokens 与 KPI 卡重复不再展示,分项改为横排图例。
-    /// 对话明细保持默认 true(hero 版:大数字 + 横排 3 列)。
-    var showsHero: Bool = true
 
     var body: some View {
+        // 对话明细用的 hero 版：大数字 + 横排 3 列。概览的 Token 拆分另有逐行版式（`OverviewTokenBreakdownPanel`）。
         VStack(alignment: .leading, spacing: 10) {
-            if showsHero {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tr("Total tokens", "总 Tokens"))
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.secondary)
-                        Text(StatsFormatter.compactToken(totals.totalTokens))
-                            .font(.system(size: 20, weight: .semibold))
-                            .monospacedDigit()
-                    }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(tr("Cache hit rate", "缓存命中率"))
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.secondary)
-                        Text(hitRateText(totals.cacheHitRate))
-                            .font(.system(size: 20, weight: .semibold))
-                            .monospacedDigit()
-                            .foregroundStyle(Color.green)
-                    }
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(tr("Total tokens", "总 Tokens"))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                    Text(StatsFormatter.compactToken(totals.totalTokens))
+                        .font(.system(size: 20, weight: .semibold))
+                        .monospacedDigit()
                 }
-
-                TokenStackBar(totals: totals)
-
-                HStack(spacing: 0) {
-                    stat(tr("Input", "输入"), StatsFormatter.compactToken(totals.inputTokens), dot: TokenCategoryStyle.input)
-                    stat(tr("Output", "输出"), StatsFormatter.compactToken(totals.outputTokens), dot: TokenCategoryStyle.output)
-                    stat(tr("Cache hit", "缓存命中"), StatsFormatter.compactToken(totals.cacheReadTokens), dot: TokenCategoryStyle.cacheRead)
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(tr("Cache hit rate", "缓存命中率"))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                    Text(hitRateText(totals.cacheHitRate))
+                        .font(.system(size: 20, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.green)
                 }
-            } else {
-                TokenStackBar(totals: totals)
+            }
 
-                HStack(spacing: 0) {
-                    stat(tr("Input", "输入"), StatsFormatter.compactToken(totals.inputTokens), dot: TokenCategoryStyle.input)
-                    stat(tr("Output", "输出"), StatsFormatter.compactToken(totals.outputTokens), dot: TokenCategoryStyle.output)
-                    stat(tr("Cache hit", "缓存命中"), StatsFormatter.compactToken(totals.cacheReadTokens), dot: TokenCategoryStyle.cacheRead)
-                    stat(tr("Hit rate", "命中率"), hitRateText(totals.cacheHitRate), valueColor: .green)
-                }
-                .padding(.top, 2)
+            TokenStackBar(totals: totals)
+
+            HStack(spacing: 0) {
+                stat(tr("Input", "输入"), StatsFormatter.compactToken(totals.inputTokens), dot: TokenCategoryStyle.input)
+                stat(tr("Output", "输出"), StatsFormatter.compactToken(totals.outputTokens), dot: TokenCategoryStyle.output)
+                stat(tr("Cache hit", "缓存命中"), StatsFormatter.compactToken(totals.cacheReadTokens), dot: TokenCategoryStyle.cacheRead)
             }
         }
     }
@@ -1976,161 +2529,19 @@ private struct TokenStackBar: View {
     }
 }
 
-/// 「按服务」「按模型」行下的紧凑一行:入 / 出 / 缓存命中 + 命中率。
-private struct TokenBreakdownInlineRow: View {
-    let totals: UsageTotals
-
-    var body: some View {
-        HStack(spacing: 10) {
-            item(tr("in", "入"), StatsFormatter.compactToken(totals.inputTokens))
-            item(tr("out", "出"), StatsFormatter.compactToken(totals.outputTokens))
-            item(tr("cache hit", "缓存命中"), StatsFormatter.compactToken(totals.cacheReadTokens))
-            Spacer(minLength: 4)
-            item(tr("hit rate", "命中率"), hitRateText(totals.cacheHitRate), emphasized: true)
-        }
-        .font(.system(size: 10.5))
-    }
-
-    private func item(_ label: String, _ value: String, emphasized: Bool = false) -> some View {
-        HStack(spacing: 3) {
-            Text(label)
-                .foregroundStyle(.tertiary)
-            Text(value)
-                .monospacedDigit()
-                .fontWeight(emphasized ? .semibold : .regular)
-                .foregroundStyle(emphasized ? Color.green : Color.secondary)
-        }
-    }
-}
-
-/// Overview 的 Fast 汇总：原始 Tokens 与计费等效 Tokens 分开展示，避免污染总 Tokens 口径。
-private struct FastUsageSummaryView: View {
-    let breakdown: UsageSpeedBreakdown
-
-    var body: some View {
-        HStack(spacing: 0) {
-            item(tr("Fast tokens", "Fast Tokens"), StatsFormatter.compactToken(breakdown.fast.totalTokens))
-            item(tr("Billing-equivalent tokens", "计费等效 Tokens"), StatsFormatter.billingEquivalentTokens(breakdown))
-            item(tr("Fast multiplier", "Fast 倍率"), StatsFormatter.fastMultiplier(breakdown))
-            item(tr("Fast estimated cost", "Fast 估算费用"), StatsFormatter.tierCost(
-                breakdown.fast.costUSD,
-                hasUnpricedUsage: breakdown.fastHasUnpricedCost,
-                costIncomplete: breakdown.fast.costIncomplete
-            ))
-            item(tr("Fast share", "Fast 占比"), fastShare)
-        }
-    }
-
-    private var fastShare: String {
-        let total = breakdown.standard.totalTokens + breakdown.fast.totalTokens + breakdown.unknown.totalTokens
-        guard total > 0 else { return "0%" }
-        return "\(Int((Double(breakdown.fast.totalTokens) / Double(total) * 100).rounded()))%"
-    }
-
-    private func item(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(size: 12.5, weight: .semibold))
-                .monospacedDigit()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct FastUsageInlineRow: View {
-    let breakdown: UsageSpeedBreakdown
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "bolt.fill")
-                .font(.system(size: 8.5, weight: .semibold))
-            Text("Fast \(StatsFormatter.compactToken(breakdown.fast.totalTokens))")
-            Text("·")
-            Text("\(tr("billing equivalent", "计费等效")) \(StatsFormatter.billingEquivalentTokens(breakdown))")
-            Text("·")
-            Text(StatsFormatter.fastMultiplier(breakdown))
-            Text("·")
-            Text(StatsFormatter.tierCost(
-                breakdown.fast.costUSD,
-                hasUnpricedUsage: breakdown.fastHasUnpricedCost,
-                costIncomplete: breakdown.fast.costIncomplete
-            ))
-            Spacer(minLength: 0)
-        }
-        .font(.system(size: 10.5, design: .monospaced))
-        .foregroundStyle(.secondary)
-    }
-}
-
-// MARK: - By service row
-
-private struct ByServiceRow: View {
-    let title: String
-    let subtitle: String
-    let app: UsageApp
-    let value: Decimal
-    let totalValue: Decimal
-    let totals: UsageTotals
-    let speed: UsageSpeedBreakdown
-
-    private var tint: Color { app.tintColor }
-
-    var body: some View {
-        // 花费金额不再展示:与 KPI 行的 Codex / Claude Code 卡完全重复,此处保留 Token 占比 + 量。
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                ServiceTile(app: app, size: 14)
-                    // 行按首行基线对齐：把 tile 的基线设在中线下方约半个大写字高，让 tile 与 12pt 标题视觉居中。
-                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                Text(subtitle)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Text("\(Int((ratio * 100).rounded()))%")
-                    .font(.system(size: 13, weight: .semibold))
-                    .monospacedDigit()
-                Text(tr("of tokens", "Token 占比"))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-            }
-            ProgressBar(value: ratio, tint: tint, height: 5)
-                .padding(.leading, 16)
-            Text("\(StatsFormatter.compactToken(totals.totalTokens)) Tokens")
-                .font(.system(size: 10.5, weight: .semibold))
-                .monospacedDigit()
-                .foregroundStyle(.primary)
-                .padding(.leading, 16)
-            TokenBreakdownInlineRow(totals: totals)
-                .padding(.leading, 16)
-            if speed.fast.requestCount > 0 {
-                FastUsageInlineRow(breakdown: speed)
-                    .padding(.leading, 16)
-            }
-        }
-        .padding(.vertical, 8)
-    }
-
-    private var ratio: Double {
-        guard totalValue > 0 else { return 0 }
-        let n = NSDecimalNumber(decimal: value).doubleValue
-        let d = NSDecimalNumber(decimal: totalValue).doubleValue
-        guard d > 0 else { return 0 }
-        return n / d
-    }
-}
-
 // MARK: - Quota timeline
 
 private struct QuotaTimelineAccountPanel: View {
     let section: QuotaTimelineSection
     /// 全局选定的窗口视角，所有账号使用同一口径。
     let selectedKind: QuotaLimitKind
-    var isWide: Bool = false
+    /// 折线图高度由额度页按画布剩余高度给出（见 `StatsView.quotaTimelineChartMinHeight`）。
+    let chartHeight: CGFloat
+    /// 报告面板除折线图外的高度（含展开的变动明细），额度页据此算折线图高度。
+    let onChromeHeightChange: (CGFloat) -> Void
+
+    /// 变动明细默认收起，保证额度页在默认窗口内一屏看完。
+    @State private var showsDetails = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -2144,6 +2555,15 @@ private struct QuotaTimelineAccountPanel: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .ccPanel(cornerRadius: 12)
+        .onHeightChange { height in
+            // 没有折线图的面板（无数据）不参与折线图高度计算。
+            onChromeHeightChange(showsChart ? height - chartHeight : 0)
+        }
+    }
+
+    private var showsChart: Bool {
+        guard let window = activeWindow else { return false }
+        return !mergedEntries(in: window).isEmpty
     }
 
     /// 当前 Picker 是全局语义；无对应数据时保留空态，不能悄悄回退到另一种窗口。
@@ -2233,19 +2653,32 @@ private struct QuotaTimelineAccountPanel: View {
         if entries.isEmpty {
             loadingOrEmpty(message: tr("No data for this window", "该窗口暂无数据"))
                 .frame(height: 80)
-        } else if isWide {
-            HStack(alignment: .top, spacing: 14) {
-                timelineChart(entries, window: window)
-                    .frame(minHeight: 140, maxHeight: .infinity)
-                    .frame(maxWidth: .infinity)
-                QuotaTimelineTable(entries: entries, spansDays: window.kind == .weekly)
-                    .frame(width: 384)
-                    .frame(maxHeight: .infinity)
-            }
         } else {
             timelineChart(entries, window: window)
-                .frame(minHeight: 140, maxHeight: .infinity)
-            QuotaTimelineTable(entries: entries, spansDays: window.kind == .weekly)
+                .frame(height: chartHeight)
+
+            let changeCount = entries.filter { $0.deltaPercent != nil }.count
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) { showsDetails.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: showsDetails ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 10)
+                    Text(tr("Change details · \(changeCount)", "变动明细 · \(changeCount) 条"))
+                        .font(.system(size: 11.5, weight: .medium))
+                    Spacer()
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+
+            if showsDetails {
+                QuotaTimelineTable(entries: entries, spansDays: window.kind == .weekly)
+                    .transition(.opacity)
+            }
         }
     }
 
@@ -2293,8 +2726,26 @@ private struct QuotaTimelineAccountPanel: View {
             entries: entries,
             tint: section.tint,
             spansDays: window.kind == .weekly,
-            domain: timelineDomain(for: window)
+            domain: timelineDomain(for: window),
+            resetAt: windowResetTime(for: window, entries: entries)
         )
+    }
+
+    /// 「窗口重置」参考线：5H 取当前窗口的起点（下次重置 − 5 小时），
+    /// 周视图取当前周期起点。都晚于现在或推不出时不画。
+    private func windowResetTime(for window: QuotaTimelineWindow, entries: [QuotaTimelineEntry]) -> Date? {
+        let now = Date()
+        switch window.kind {
+        case .fiveHour:
+            guard let next = window.resetsAt ?? entries.last(where: { $0.resetsAt != nil })?.resetsAt else { return nil }
+            var start = next.addingTimeInterval(-5 * 3600)
+            while start > now { start.addTimeInterval(-5 * 3600) }
+            return Calendar.current.isDate(start, inSameDayAs: now) ? start : nil
+        case .weekly:
+            return window.periods.first(where: { $0.kind == .currentCycle })?.start
+        case .modelWeekly, .unknown:
+            return nil
+        }
     }
 
     private func timelineDomain(for window: QuotaTimelineWindow) -> ClosedRange<Date> {
@@ -2362,12 +2813,16 @@ private struct QuotaTimelineChart: View {
     let tint: Color
     var spansDays: Bool = false
     let domain: ClosedRange<Date>
+    /// 「窗口重置」竖线；nil 不画。
+    var resetAt: Date?
+    /// 「现在」竖线，放进域里保证可见。
+    var now = Date()
 
     /// X 轴按实际数据范围自适应，不再固定成整段周期：一天/一周里只有少数几次变动时，
     /// 固定域会把所有点挤在很窄的一段。两端各留一点余量，避免首尾点贴着轴；
     /// 单点或零跨度时退回固定余量，防止退化成零宽度域。
     private var xDomain: ClosedRange<Date> {
-        let times = entries.map(\.sampledAt)
+        let times = entries.map(\.sampledAt) + [now] + (resetAt.map { [$0] } ?? [])
         guard let first = times.min(), let last = times.max() else { return domain }
         let span = last.timeIntervalSince(first)
         let padding = span > 0 ? span * 0.04 : (spansDays ? 1_800 : 900)
@@ -2375,23 +2830,40 @@ private struct QuotaTimelineChart: View {
     }
 
     var body: some View {
-        Chart(entries) { entry in
-            // series 按额度窗口分段：跨窗重置不产生变动事件，不分段会把上一窗口的低点
-            // 和新窗口的高点直连成一条「额度自己涨回去」的假斜线。
-            LineMark(
-                x: .value("Time", entry.sampledAt),
-                y: .value("Remaining", entry.remainingPercent),
-                series: .value("Window", entry.windowIndex)
-            )
-            .foregroundStyle(tint)
-            .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+        Chart {
+            ForEach(entries) { entry in
+                // series 按额度窗口分段：跨窗重置不产生变动事件，不分段会把上一窗口的低点
+                // 和新窗口的高点直连成一条「额度自己涨回去」的假斜线。
+                LineMark(
+                    x: .value("Time", entry.sampledAt),
+                    y: .value("Remaining", entry.remainingPercent),
+                    series: .value("Window", entry.windowIndex)
+                )
+                .foregroundStyle(tint)
+                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
 
-            PointMark(
-                x: .value("Time", entry.sampledAt),
-                y: .value("Remaining", entry.remainingPercent)
-            )
-            .foregroundStyle(chartPointColor(remainingPercent: Double(entry.remainingPercent)))
-            .symbolSize(40)
+                PointMark(
+                    x: .value("Time", entry.sampledAt),
+                    y: .value("Remaining", entry.remainingPercent)
+                )
+                .foregroundStyle(chartPointColor(remainingPercent: Double(entry.remainingPercent)))
+                .symbolSize(40)
+            }
+
+            if let resetAt {
+                RuleMark(x: .value("Time", resetAt))
+                    .foregroundStyle(Color.secondary.opacity(0.45))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .annotation(position: .top, alignment: .leading, spacing: 2) {
+                        referenceLabel(tr("Window reset", "窗口重置"))
+                    }
+            }
+            RuleMark(x: .value("Time", now))
+                .foregroundStyle(Color.secondary.opacity(0.45))
+                .lineStyle(StrokeStyle(lineWidth: 1))
+                .annotation(position: .top, alignment: .trailing, spacing: 2) {
+                    referenceLabel(tr("Now", "现在"))
+                }
         }
         .chartYScale(domain: 0...100)
         .chartXScale(domain: xDomain)
@@ -2426,6 +2898,13 @@ private struct QuotaTimelineChart: View {
         // 左:Y 轴刻度不贴面板内容左缘;右:末尾数据点 / X 轴标签不贴相邻表格。
         .padding(.leading, 12)
         .padding(.trailing, 8)
+    }
+
+    private func referenceLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9.5))
+            .foregroundStyle(.tertiary)
+            .fixedSize()
     }
 
     /// 图表内数据点 3 档色:low / empty 沿用全局 `statusColor`;
@@ -2562,6 +3041,8 @@ private struct QuotaTimelineWindow: Identifiable {
     let kind: QuotaLimitKind
     let currentRemaining: Int?
     let latestSampleAt: Date?
+    /// 快照里的下次重置时间，画「窗口重置」参考线用。
+    let resetsAt: Date?
     let periods: [QuotaTimelinePeriod]
 }
 
@@ -2742,6 +3223,19 @@ enum StatsFormatter {
         return "\(day(start)) – \(monthDayFormatter.string(from: end))"
     }
 
+    /// 左闭右开区间的日期范围：单日 `2026-09-28`,同年 `2026-08-30 至 09-28`,跨年两端都带年份。
+    @MainActor
+    static func dayRange(from: Date, toExclusive: Date) -> String {
+        let cal = StatsRange.weekStartMondayCalendar
+        let last = cal.startOfDay(for: toExclusive.addingTimeInterval(-1))
+        let first = cal.startOfDay(for: from)
+        if last <= first { return day(first) }
+        let end = cal.component(.year, from: first) == cal.component(.year, from: last)
+            ? monthDayFormatter.string(from: last)
+            : day(last)
+        return tr("\(day(first)) – \(end)", "\(day(first)) 至 \(end)")
+    }
+
     /// 月桶标题(如 `2026-09`)。
     static func month(_ start: Date) -> String {
         monthFormatter.string(from: start)
@@ -2778,6 +3272,13 @@ enum StatsFormatter {
     /// 时间线使用的时刻格式：同一窗口跨天（滚动周窗口 / 跨午夜 5H）时带 MM-dd 前缀。
     static func timelineTime(_ date: Date, spansDays: Bool) -> String {
         spansDays ? resetTimeWithDayFormatter.string(from: date) : time(date)
+    }
+
+    /// 占比文案：取整百分比；大于 0 但不足 1% 时显示「<1%」，避免有用量却显示 0%。
+    static func percent(_ ratio: Double) -> String {
+        guard ratio.isFinite, ratio > 0 else { return "0%" }
+        let value = Int((ratio * 100).rounded())
+        return value == 0 ? "<1%" : "\(min(100, value))%"
     }
 
     static func quotaDelta(_ value: Int) -> String {

@@ -19,6 +19,8 @@ struct ConversationStatsView: View {
     @Binding var customFrom: Date
     @Binding var customTo: Date
     let serviceFilter: StatsServiceFilter
+    /// 从概览 / 项目页跳来的目标（选中对话、按费用排序、按项目筛选），消费后清空。
+    @Binding var navigation: StatsNavigationRequest?
 
     @State private var search = ""
     @State private var sort: ConversationQuerySort = .recent
@@ -46,6 +48,8 @@ struct ConversationStatsView: View {
                 await appState.usageService.scanNow()
             }
         }
+        .onAppear { applyNavigation() }
+        .onChange(of: navigation) { _, _ in applyNavigation() }
         .onChange(of: serviceFilter) { _, _ in reconcileScope() }
         .onChange(of: range) { _, _ in reconcileScope() }
         .onChange(of: projectKey) { _, _ in reconcileSelection() }
@@ -206,11 +210,9 @@ struct ConversationStatsView: View {
                     description: Text(tr("Try another time range or refresh local usage.", "请切换时间范围或刷新本地用量。"))
                 )
             } else {
-                List(selection: $selection) {
-                    ForEach(Array(rows.prefix(visibleLimit))) { row in
-                        ConversationListRow(summary: row)
-                            .tag(row.id)
-                    }
+                StatsSelectionList(items: Array(rows.prefix(visibleLimit)), selection: $selection) { row in
+                    ConversationListRow(summary: row)
+                } trailing: {
                     if rows.count > visibleLimit {
                         Button(tr("Show more", "显示更多")) { visibleLimit += 200 }
                             .buttonStyle(.plain)
@@ -218,7 +220,6 @@ struct ConversationStatsView: View {
                             .padding(.vertical, 8)
                     }
                 }
-                .listStyle(.inset)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -300,6 +301,27 @@ struct ConversationStatsView: View {
         }
     }
 
+    private func applyNavigation() {
+        guard let request = navigation else { return }
+        switch request.target {
+        case .conversation(let key):
+            search = ""
+            projectKey = nil
+            selection = key
+        case .conversationsByCost:
+            search = ""
+            projectKey = nil
+            sort = .cost
+        case .conversationsInProject(let key):
+            search = ""
+            projectKey = key
+        case .projectsList, .project, .unattributed:
+            return
+        }
+        visibleLimit = 200
+        navigation = nil
+    }
+
     private func reconcileScope() {
         let result = queryResult
         if let projectKey, !result.projectKeys.contains(projectKey) {
@@ -378,7 +400,6 @@ private struct ConversationListRow: View {
             .font(.system(size: 10.5, design: .monospaced))
             .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 5)
     }
 
     private var projectLabel: String {
@@ -460,7 +481,7 @@ private struct ConversationDetailView: View {
                 (tr("Cache read", "缓存读取"), StatsFormatter.compactToken(detail.totals.cacheReadTokens)),
                 (tr("Cache write", "缓存写入"), cacheCreationText),
                 (tr("Requests", "请求数"), StatsFormatter.token(detail.totals.requestCount)),
-                (tr("Estimated cost", "API 等值估算费用"), costLabel(detail.costs))
+                (tr("Estimated cost", "估算费用"), costLabel(detail.costs))
             ])
         }
     }

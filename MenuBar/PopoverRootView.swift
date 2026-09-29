@@ -566,7 +566,7 @@ private struct ServiceBlockView: View {
                         Spacer(minLength: 0)
 
                         if showsCost {
-                            BilingualInline(english: "cost", chinese: "花费")
+                            BilingualInline(english: "cost", chinese: "费用")
                                 .font(.system(size: 9.5))
                                 .foregroundStyle(.quaternary)
                         }

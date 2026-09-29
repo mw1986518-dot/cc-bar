@@ -64,22 +64,23 @@ func statusColor(remainingPercent: Double?, tint: Color) -> Color {
 }
 
 // normal 档统一用石墨灰(中性灰),不随服务识别色变化。
-private let quotaNormalColor = quotaAdaptiveColor(
+private let quotaNormalColor = adaptiveColor(
     light: (red: 108, green: 108, blue: 112), // #6C6C70
     dark: (red: 152, green: 152, blue: 157)   // #98989D
 )
 
-private let quotaLowColor = quotaAdaptiveColor(
+private let quotaLowColor = adaptiveColor(
     light: (red: 199, green: 83, blue: 0),    // #C75300
     dark: (red: 255, green: 161, blue: 95)    // #FFA15F
 )
 
-private let quotaEmptyColor = quotaAdaptiveColor(
+private let quotaEmptyColor = adaptiveColor(
     light: (red: 209, green: 36, blue: 58),   // #D1243A
     dark: (red: 255, green: 122, blue: 144)   // #FF7A90
 )
 
-private func quotaAdaptiveColor(
+/// 按浅 / 深色外观切换的固定色值（0~255）。状态色与统计页色阶共用。
+func adaptiveColor(
     light: (red: CGFloat, green: CGFloat, blue: CGFloat),
     dark: (red: CGFloat, green: CGFloat, blue: CGFloat)
 ) -> Color {
@@ -93,6 +94,54 @@ private func quotaAdaptiveColor(
             alpha: 1
         )
     })
+}
+
+// MARK: - Composition palette（统计页非服务维度）
+//
+// 见 docs/设计风格.md §4.4。提供商 / 模型 / 项目没有识别色，按排名套紫色顺序色阶（第 1 名最深）。
+// 不用蓝色（Antigravity / Pi / DSH 识别色与系统 Accent 都是蓝）；不用灰色（与 Codex 石墨灰、Cursor 近黑混淆）。
+// 色阶只表示排名，不表示身份，使用处必须同时显示名称或图例。
+
+enum CompositionPalette {
+    private static let ranks: [Color] = [
+        adaptiveColor(light: (63, 58, 143), dark: (179, 173, 242)),    // #3F3A8F / #B3ADF2
+        adaptiveColor(light: (94, 86, 194), dark: (143, 135, 230)),    // #5E56C2 / #8F87E6
+        adaptiveColor(light: (140, 133, 217), dark: (108, 99, 204)),   // #8C85D9 / #6C63CC
+        adaptiveColor(light: (189, 184, 236), dark: (77, 70, 158)),    // #BDB8EC / #4D469E
+        adaptiveColor(light: (218, 215, 245), dark: (58, 53, 120))     // #DAD7F5 / #3A3578（模型维度第 5 名）
+    ]
+
+    /// 第 `index + 1` 名；超出色阶时用最浅一级。
+    static func rank(_ index: Int) -> Color {
+        ranks[min(max(0, index), ranks.count - 1)]
+    }
+
+    /// 「其他 / 其余」。
+    static let rest = adaptiveColor(light: (199, 199, 204), dark: (72, 72, 74))           // #C7C7CC / #48484A
+    /// 「未归属」斜纹线色。
+    static let unattributedStripe = adaptiveColor(light: (199, 199, 204), dark: (99, 99, 102)) // #C7C7CC / #636366
+    /// 高消耗对话金额条（中性灰）。
+    static let amountBar = Color(red: 174 / 255, green: 174 / 255, blue: 178 / 255)       // #AEAEB2
+}
+
+/// 「未归属」的 135° 灰色斜纹，线距 3pt。尺寸由外层决定。
+struct UnattributedStripes: View {
+    var body: some View {
+        Canvas { context, size in
+            let spacing: CGFloat = 3
+            var path = Path()
+            var x: CGFloat = -size.height
+            while x < size.width {
+                path.move(to: CGPoint(x: x, y: size.height))
+                path.addLine(to: CGPoint(x: x + size.height, y: 0))
+                x += spacing
+            }
+            context.stroke(path, with: .color(CompositionPalette.unattributedStripe), lineWidth: 1)
+        }
+        .overlay(
+            Rectangle().strokeBorder(CompositionPalette.unattributedStripe, lineWidth: 0.5)
+        )
+    }
 }
 
 // MARK: - Reset time (hover 切换格式)
@@ -516,5 +565,84 @@ struct PopoverIconButtonStyle: ButtonStyle {
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
             .pointingHandCursor()
+    }
+}
+
+// MARK: - Stats selectable list（对话 / 项目列表）
+//
+// 统计页对话、项目两个主从列表共用：自绘选中态，不使用系统 List 的强调色整行高亮。
+// 选中 = 圆角 8pt 中性浅底 `primary.opacity(0.08)`，悬停 `0.04`。
+
+/// 可选中列表行：整行可点，选中 / 悬停背景统一在这里。
+struct StatsSelectableRow<Content: View>: View {
+    let isSelected: Bool
+    let action: () -> Void
+    @ViewBuilder var content: () -> Content
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            content()
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(isSelected ? 0.08 : (isHovered ? 0.04 : 0)))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .pointingHandCursor()
+    }
+}
+
+/// 主从列表容器：`ScrollView` + `LazyVStack`，↑ / ↓ 切换选中，选中变化时滚动到可见。
+struct StatsSelectionList<Item: Identifiable, Row: View, Trailing: View>: View where Item.ID == String {
+    let items: [Item]
+    @Binding var selection: String?
+    @ViewBuilder var row: (Item) -> Row
+    @ViewBuilder var trailing: () -> Trailing
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(items) { item in
+                        StatsSelectableRow(isSelected: selection == item.id) {
+                            selection = item.id
+                        } content: {
+                            row(item)
+                        }
+                        .id(item.id)
+                    }
+                    trailing()
+                }
+                .padding(8)
+            }
+            .focusable()
+            .focusEffectDisabled()
+            .onKeyPress(.upArrow) { move(-1) }
+            .onKeyPress(.downArrow) { move(1) }
+            .onChange(of: selection) { _, id in
+                guard let id else { return }
+                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(id) }
+            }
+        }
+    }
+
+    private func move(_ offset: Int) -> KeyPress.Result {
+        guard let index = items.firstIndex(where: { $0.id == selection }) else { return .ignored }
+        let target = index + offset
+        if items.indices.contains(target) { selection = items[target].id }
+        return .handled
+    }
+}
+
+extension StatsSelectionList where Trailing == EmptyView {
+    init(items: [Item], selection: Binding<String?>, @ViewBuilder row: @escaping (Item) -> Row) {
+        self.init(items: items, selection: selection, row: row, trailing: { EmptyView() })
     }
 }

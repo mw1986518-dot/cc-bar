@@ -256,6 +256,11 @@ enum CodexJSONLScanner {
         // mtime 没变 & size 没变 → 跳过，用 state 元数据补种子。
         if state.mtime == mtime, state.offset == size {
             if let id = state.conversationID ?? filenameID {
+                // 旧版本扫描过的文件没有记录分支：只读一次首行的 session_meta 补齐，
+                // 读到或确认没有分支后写回（空串表示已检查），之后不再读。
+                if state.conversationGitBranch == nil {
+                    state.conversationGitBranch = firstLineGitBranch(url: url) ?? ""
+                }
                 var projectResolver = ConversationProjectResolver()
                 return CodexFileScanResult(
                     stateKey: stateKey,
@@ -268,7 +273,7 @@ enum CodexJSONLScanner {
                         app: .codex,
                         title: indexedTitles[id] ?? state.fallbackTitle,
                         project: projectResolver.resolve(rawPath: state.conversationCwd ?? "", source: .cwd),
-                        gitBranch: nil,
+                        gitBranch: nonEmpty(state.conversationGitBranch),
                         sourcePath: path,
                         includesSubtasks: false,
                         cacheCreationAvailable: false
@@ -291,6 +296,7 @@ enum CodexJSONLScanner {
         if state.offset > size {
             resetForTruncation(&state)
         }
+        let startsFromBeginning = state.offset == 0
 
         var linesParsed = 0
         var currentModel = state.lastModel
@@ -303,6 +309,7 @@ enum CodexJSONLScanner {
         // 只用于生成跨文件去重键，让重放行与父文件里的原始行同键。
         var emittingSessionID = state.lastCodexEmittingSessionID ?? ownSessionID
         var sessionCwd = state.conversationCwd ?? ""
+        var sessionBranch = nonEmpty(state.conversationGitBranch)
         var fallbackTitle = state.fallbackTitle
         var entries: [PendingCodexEntry] = []
         // 按批流式解析：单文件不再把整份内容和全部行同时读进内存。
@@ -320,6 +327,7 @@ enum CodexJSONLScanner {
                     // fork 文件里混着父会话原样重放的 session_meta，只有自身那条能定义会话元数据。
                     if metaID == nil || metaID == ownSessionID {
                         sessionCwd = (payload["cwd"] as? String) ?? sessionCwd
+                        sessionBranch = Self.gitBranch(inSessionMeta: payload) ?? sessionBranch
                     }
                     continue
                 }
@@ -445,6 +453,8 @@ enum CodexJSONLScanner {
         state.lastCodexEmittingSessionID = emittingSessionID
         state.conversationID = ownSessionID
         state.conversationCwd = sessionCwd
+        // 从头读过仍没有分支时记空串，避免之后按「未检查」再读首行。
+        state.conversationGitBranch = sessionBranch ?? (startsFromBeginning ? "" : state.conversationGitBranch)
         state.fallbackTitle = fallbackTitle
 
         var seedKey: String?
@@ -458,7 +468,7 @@ enum CodexJSONLScanner {
                 app: .codex,
                 title: indexedTitles[id] ?? fallbackTitle,
                 project: projectResolver.resolve(rawPath: sessionCwd, source: .cwd),
-                gitBranch: nil,
+                gitBranch: sessionBranch,
                 sourcePath: path,
                 includesSubtasks: false,
                 // 由调用方在跨文件去重之后统一补标（见 scan 收尾）。
@@ -562,5 +572,38 @@ enum CodexJSONLScanner {
         state.lastServiceTier = nil
         state.lastCodexTotalUsageSignature = nil
         state.lastCodexEmittingSessionID = nil
+    }
+
+    /// `session_meta.payload.git.branch`；字段缺失或为空时返回 nil。
+    nonisolated static func gitBranch(inSessionMeta payload: [String: Any]) -> String? {
+        guard let git = payload["git"] as? [String: Any] else { return nil }
+        return nonEmpty(git["branch"] as? String)
+    }
+
+    private nonisolated static func nonEmpty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
+    }
+
+    /// 只读文件首行（Codex 首行固定是本会话的 session_meta）取分支。
+    /// 首行含完整 base_instructions，可能有几十 KB；超过 2MB 仍无换行视为异常，放弃。
+    private nonisolated static func firstLineGitBranch(url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var data = Data()
+        let newline = UInt8(ascii: "\n")
+        while data.count < 2 << 20 {
+            guard let chunk = try? handle.read(upToCount: 256 << 10), !chunk.isEmpty else { break }
+            if let index = chunk.firstIndex(of: newline) {
+                data.append(chunk[chunk.startIndex..<index])
+                break
+            }
+            data.append(chunk)
+        }
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (root["type"] as? String) == "session_meta",
+              let payload = root["payload"] as? [String: Any]
+        else { return nil }
+        return gitBranch(inSessionMeta: payload)
     }
 }

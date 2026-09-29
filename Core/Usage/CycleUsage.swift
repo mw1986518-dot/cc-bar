@@ -33,11 +33,14 @@ nonisolated struct CycleUsageBucket: Sendable, Codable, Equatable {
     var requestCount: Int
     var hasUnpricedUsage: Bool
     var quality: CycleUsageQuality
+    /// 来源对话；额度页按项目拆分周期进度时用。旧版本写入的桶没有该字段（nil），拆分时计入「其他」。
+    /// 不参与 `UsageHistoryConsistency.cycleVector` 的键，安全重算的周期对账口径不变。
+    var conversationKey: String?
 
     enum CodingKeys: String, CodingKey {
         case cycleID, allowanceSegmentID, app, model, speed
         case inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens
-        case costUSD, requestCount, hasUnpricedUsage, quality
+        case costUSD, requestCount, hasUnpricedUsage, quality, conversationKey
     }
 
     init(
@@ -53,7 +56,8 @@ nonisolated struct CycleUsageBucket: Sendable, Codable, Equatable {
         costUSD: Decimal,
         requestCount: Int,
         hasUnpricedUsage: Bool,
-        quality: CycleUsageQuality
+        quality: CycleUsageQuality,
+        conversationKey: String? = nil
     ) {
         self.cycleID = cycleID
         self.allowanceSegmentID = allowanceSegmentID
@@ -68,6 +72,7 @@ nonisolated struct CycleUsageBucket: Sendable, Codable, Equatable {
         self.requestCount = requestCount
         self.hasUnpricedUsage = hasUnpricedUsage
         self.quality = quality
+        self.conversationKey = conversationKey
     }
 
     init(from decoder: Decoder) throws {
@@ -85,6 +90,7 @@ nonisolated struct CycleUsageBucket: Sendable, Codable, Equatable {
         requestCount = try c.decode(Int.self, forKey: .requestCount)
         hasUnpricedUsage = try c.decode(Bool.self, forKey: .hasUnpricedUsage)
         quality = try c.decode(CycleUsageQuality.self, forKey: .quality)
+        conversationKey = try c.decodeIfPresent(String.self, forKey: .conversationKey)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -102,6 +108,7 @@ nonisolated struct CycleUsageBucket: Sendable, Codable, Equatable {
         try c.encode(requestCount, forKey: .requestCount)
         try c.encode(hasUnpricedUsage, forKey: .hasUnpricedUsage)
         try c.encode(quality, forKey: .quality)
+        try c.encodeIfPresent(conversationKey, forKey: .conversationKey)
     }
 }
 
@@ -255,6 +262,7 @@ final class CycleUsageAggregator {
         var model: String
         var speed: UsageSpeed
         var quality: CycleUsageQuality
+        var conversationKey: String?
     }
 
     private var buckets: [BucketKey: CycleUsageBucket] = [:]
@@ -306,7 +314,8 @@ final class CycleUsageAggregator {
                     costUSD: entry.costUSD ?? 0,
                     requestCount: entry.requestCount,
                     hasUnpricedUsage: entry.costUSD == nil,
-                    quality: quality
+                    quality: quality,
+                    conversationKey: entry.conversationKey
                 )
                 changed = true
             }
@@ -441,7 +450,8 @@ final class CycleUsageAggregator {
         costUSD: Decimal,
         requestCount: Int,
         hasUnpricedUsage: Bool,
-        quality: CycleUsageQuality
+        quality: CycleUsageQuality,
+        conversationKey: String?
     ) {
         let key = BucketKey(
             cycleID: cycleID,
@@ -449,7 +459,8 @@ final class CycleUsageAggregator {
             app: app,
             model: model,
             speed: speed,
-            quality: quality
+            quality: quality,
+            conversationKey: conversationKey
         )
         if var bucket = buckets[key] {
             bucket.inputTokens += inputTokens
@@ -474,7 +485,8 @@ final class CycleUsageAggregator {
                 costUSD: costUSD,
                 requestCount: requestCount,
                 hasUnpricedUsage: hasUnpricedUsage,
-                quality: quality
+                quality: quality,
+                conversationKey: conversationKey
             )
         }
     }
@@ -486,10 +498,19 @@ final class CycleUsageAggregator {
             app: bucket.app,
             model: bucket.model,
             speed: bucket.speed,
-            quality: bucket.quality
+            quality: bucket.quality,
+            conversationKey: bucket.conversationKey
         )
     }
 
+    /// 某个周期内按来源对话汇总的用量；key 为 nil 的一项是旧版本写入、没有对话信息的桶。
+    func usageByConversation(cycleID: String) -> [String?: UsageTotals] {
+        var result: [String?: UsageTotals] = [:]
+        for bucket in buckets.values where bucket.cycleID == cycleID {
+            result[bucket.conversationKey, default: .zero].add(bucket.usageTotals)
+        }
+        return result
+    }
 }
 
 private extension CycleUsageBucket {

@@ -264,6 +264,126 @@ nonisolated struct ConversationQueryResult: Sendable {
     )
 }
 
+// MARK: - 项目汇总（统计页概览 / 项目页）
+
+/// 统计页使用的项目身份：worktree 已折算到主仓库，其余与对话档案里的项目身份一致。
+nonisolated struct StatsProjectIdentity: Sendable, Equatable {
+    var key: String
+    var name: String
+    var path: String
+    var status: ConversationProjectStatus
+}
+
+/// 概览「用量构成 · 项目」与项目列表共用的查询条件。时间、服务过滤与概览 KPI 相同。
+nonisolated struct ConversationOverviewRequest: Sendable, Hashable {
+    var revision: UInt64
+    var from: Date
+    var to: Date
+    /// 可见服务 ∩ 侧栏服务筛选。
+    var apps: Set<UsageApp>
+    var topConversationLimit: Int
+}
+
+nonisolated struct ProjectUsageRow: Sendable, Equatable, Identifiable {
+    var key: String
+    var name: String
+    var path: String
+    var status: ConversationProjectStatus
+    var totals: UsageTotals
+    var speed: UsageSpeedBreakdown
+    var totalsByApp: [UsageApp: UsageTotals]
+    var conversationCount: Int
+    var lastAt: Date
+    /// 范围内有用量、且被计入本项目的 worktree 数量。
+    var worktreeCount: Int
+    var id: String { key }
+
+    /// 无明确项目 / CCBar 系统任务：在列表和构成里固定排在末尾或并入「其余」。
+    var isSpecial: Bool { !status.isPathBased }
+}
+
+/// 高消耗对话行：对话汇总 + 折算后的项目名称。
+nonisolated struct TopConversationRow: Sendable, Equatable, Identifiable {
+    var summary: ConversationSummary
+    var project: StatsProjectIdentity
+    var id: String { summary.id }
+}
+
+nonisolated struct UsageDayAppKey: Sendable, Hashable {
+    var day: Date
+    var app: UsageApp
+}
+
+nonisolated struct ConversationOverviewResult: Sendable {
+    /// 按 API 等值降序、同值按名称升序；包括无明确项目与系统任务。
+    var projects: [ProjectUsageRow]
+    /// 能归属到任何对话档案的用量，按服务合计；未归属 = 概览合计 − 这里。
+    var attributedByApp: [UsageApp: UsageTotals]
+    /// 同上，按 (天, 服务)；未归属详情画每日图时用。
+    var attributedByDayApp: [UsageDayAppKey: UsageTotals]
+    /// 按 API 等值取前 N 个对话。
+    var topConversations: [TopConversationRow]
+
+    static let empty = ConversationOverviewResult(
+        projects: [],
+        attributedByApp: [:],
+        attributedByDayApp: [:],
+        topConversations: []
+    )
+}
+
+nonisolated struct ProjectDetailRequest: Sendable, Hashable {
+    var revision: UInt64
+    var projectKey: String
+    var from: Date
+    var to: Date
+    /// 上一个等长区间；nil 时不计算 delta。
+    var previous: Range<Date>?
+    var apps: Set<UsageApp>
+}
+
+nonisolated struct ProjectModelUsage: Sendable, Equatable, Identifiable {
+    var model: String
+    var apps: Set<UsageApp>
+    var totals: UsageTotals
+    var id: String { model }
+}
+
+nonisolated struct ProjectBranchUsage: Sendable, Equatable, Identifiable {
+    /// nil = 日志里没有分支信息。
+    var branch: String?
+    var conversationCount: Int
+    var totals: UsageTotals
+    var id: String { branch ?? "" }
+}
+
+nonisolated struct ProjectWorktreeUsage: Sendable, Equatable, Identifiable {
+    var path: String
+    var branch: String?
+    var isMain: Bool
+    var totals: UsageTotals
+    var id: String { path }
+}
+
+nonisolated struct ProjectDetail: Sendable, Equatable {
+    var project: StatsProjectIdentity
+    var totals: UsageTotals
+    var previousTotals: UsageTotals?
+    var conversationCount: Int
+    var activeDays: Int
+    /// 范围内按 (天, 服务) 的用量，视图按粒度归并成柱。
+    var dailyByApp: [UsageDayAppKey: UsageTotals]
+    var totalsByApp: [UsageApp: UsageTotals]
+    var models: [ProjectModelUsage]
+    var branches: [ProjectBranchUsage]
+    var topConversations: [TopConversationRow]
+    /// 只有项目含 worktree 时非空：主仓库在前，其余按用量降序。
+    var worktrees: [ProjectWorktreeUsage]
+    /// 全部时间（不受时间范围限制，仍受服务过滤）。
+    var allTimeTotals: UsageTotals
+    var firstUsedDay: Date?
+}
+
 nonisolated struct ConversationModelSummary: Sendable, Equatable, Identifiable {
     var model: String
     var totals: UsageTotals

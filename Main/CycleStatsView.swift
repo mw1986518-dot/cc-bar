@@ -1,14 +1,23 @@
 import SwiftUI
 
-struct CycleStatsView: View {
+/// 额度页「当前周期」：Codex / Claude × 5 小时 / 周的周期卡，宽画布一行四张。
+/// 进度条的已用部分按项目分段（估算，见 `CycleProjectSplit`）；剩余状态由「官方 N%」的颜色表达。
+struct QuotaCycleCardsSection: View {
     @Environment(AppState.self) private var appState
+    /// 受侧栏服务筛选约束：全部 → Codex + Claude；单选时只含该服务。
+    let apps: [UsageApp]
+    let isWide: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            header
-
-            if appState.usageService.isCycleRebuilding {
-                HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(tr("Current cycles", "当前周期"))
+                    .font(.system(size: 13, weight: .semibold))
+                Text(tr("Split by project is an estimate", "按项目拆分为估算"))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                if appState.usageService.isCycleRebuilding {
                     ProgressView().controlSize(.small)
                     Text(tr("Rebuilding current cycle data…", "正在补算当前周期数据…"))
                         .font(.system(size: 11.5))
@@ -16,62 +25,54 @@ struct CycleStatsView: View {
                 }
             }
 
-            currentCyclesSection
-        }
-        .padding(20)
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(tr("Cycle usage", "周期用量"))
-                .font(.system(size: 18, weight: .semibold))
-                .kerning(-0.2)
-        }
-    }
-
-    // MARK: - 当前周期
-
-    /// Codex / Claude × 5 小时 / 周共 4 张 KPI 卡；两行两列，每张占半行宽度。
-    private var currentCyclesSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(tr("Current cycles", "当前周期"))
-                .font(.system(size: 13, weight: .semibold))
-
-            VStack(spacing: 12) {
-                HStack(spacing: 12) {
-                    currentCycleKpiCard(app: .codex, kind: .fiveHour)
-                    currentCycleKpiCard(app: .codex, kind: .weekly)
-                }
-                HStack(spacing: 12) {
-                    currentCycleKpiCard(app: .claude, kind: .fiveHour)
-                    currentCycleKpiCard(app: .claude, kind: .weekly)
+            LazyVGrid(
+                columns: Array(
+                    repeating: GridItem(.flexible(), spacing: 12, alignment: .top),
+                    count: isWide ? max(1, cards.count) : min(2, max(1, cards.count))
+                ),
+                alignment: .leading,
+                spacing: 12
+            ) {
+                ForEach(cards, id: \.self) { card in
+                    currentCycleCard(app: card.app, kind: card.kind)
                 }
             }
         }
     }
 
-    /// KPI 卡：6pt 识别色点 + 服务/周期标签 → 整周期预估 Tokens·费用大字 →
-    /// 已用辅助行 → 迷你进度条 → 倒计时。空态只保留标签与一句引导。
-    private func currentCycleKpiCard(app: UsageApp, kind: QuotaLimitKind) -> some View {
+    private struct CardKey: Hashable {
+        let app: UsageApp
+        let kind: QuotaLimitKind
+    }
+
+    /// 固定顺序：Codex 5 小时、Codex 周、Claude 5 小时、Claude 周。
+    private var cards: [CardKey] {
+        [UsageApp.codex, .claude]
+            .filter { apps.contains($0) }
+            .flatMap { app in [CardKey(app: app, kind: .fiveHour), CardKey(app: app, kind: .weekly)] }
+    }
+
+    private func currentCycleCard(app: UsageApp, kind: QuotaLimitKind) -> some View {
         Group {
             if let summary = currentSummary(app: app, kind: kind) {
-                cycleKpiBody(summary, app: app, kind: kind)
+                cycleCardBody(summary, app: app, kind: kind)
             } else {
-                cycleKpiEmptyState(app: app, kind: kind)
+                cycleCardEmptyState(app: app, kind: kind)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .frame(height: 152)
+        .frame(height: 188)
         .ccPanel(cornerRadius: 10)
     }
 
-    /// 卡主体：标签行 → 用满预估大字 → 已用辅助行 → 迷你进度条 → 倒计时。
-    private func cycleKpiBody(
+    /// 卡主体：标签行 → 用满预估 → 已用 + 官方比例 → 按项目分段的进度条 → 图例 → 倒计时。
+    private func cycleCardBody(
         _ summary: CycleUsageSummary,
         app: UsageApp,
         kind: QuotaLimitKind
     ) -> some View {
-        let usedPercent = max(0, summary.cycle.latestUsedPercent)
+        let usedPercent = max(0, min(100, summary.cycle.latestUsedPercent))
+        let segments = projectSegments(summary, usedPercent: usedPercent)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
@@ -91,43 +92,69 @@ struct CycleStatsView: View {
                 }
             }
 
-            Text(fullUseLine(summary))
-                .font(.system(size: 24, weight: .semibold))
-                .kerning(-0.5)
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(tr("Full-use estimate", "用满预估"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                Text(fullUseLine(summary))
+                    .font(.system(size: 22, weight: .semibold))
+                    .kerning(-0.5)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+
+            HStack(alignment: .firstTextBaseline) {
+                Text("\(tr("Used", "已用")) \(StatsFormatter.compactToken(summary.totals.totalTokens)) · \(StatsFormatter.tierCostWhole(summary.totals.costUSD, hasUnpricedUsage: summary.totals.hasUnpricedUsage))")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 6)
+                // 剩余状态由数字颜色表达：≥20% primary、<20% 橙、=0 红（统一走 statusColor）。
+                Text("\(tr("Official", "官方")) \(String(format: "%.0f%%", usedPercent))")
+                    .font(.system(size: 12, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(officialColor(remaining: 100 - usedPercent))
+                    .lineLimit(1)
+            }
+
+            CycleProjectBar(segments: segments)
                 .padding(.top, 2)
 
-            Text(
-                "\(tr("Used", "已用")) \(StatsFormatter.compactToken(summary.totals.totalTokens)) · \(StatsFormatter.tierCostWhole(summary.totals.costUSD, hasUnpricedUsage: summary.totals.hasUnpricedUsage)) · \(String(format: "%.1f%%", usedPercent))"
-            )
-            .font(.system(size: 13))
-            .foregroundStyle(.secondary)
-            .monospacedDigit()
-            .lineLimit(1)
-            .minimumScaleFactor(0.8)
-
-            ProgressBar(
-                value: usedPercent / 100,
-                tint: statusColor(remainingPercent: 100 - usedPercent, tint: app.tintColor),
-                height: 4
-            )
-            .padding(.top, 3)
+            HStack(spacing: 10) {
+                ForEach(segments) { segment in
+                    HStack(spacing: 4) {
+                        CompositionSwatch(role: segment.role, size: 8)
+                        Text(segment.name)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(height: 14)
 
             Spacer(minLength: 0)
 
             ResetTimeText(resetsAt: summary.cycle.endAt)
-                .font(.system(size: 12))
+                .font(.system(size: 11.5))
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
         }
-        .padding(.vertical, 18)
+        .padding(.vertical, 14)
         .padding(.horizontal, 16)
     }
 
+    private func officialColor(remaining: Double) -> Color {
+        remaining >= 20 ? .primary : statusColor(remainingPercent: remaining, tint: .primary)
+    }
+
     /// 空态卡：标签行固定在顶部，下方提示内容在剩余空间垂直居中。
-    private func cycleKpiEmptyState(app: UsageApp, kind: QuotaLimitKind) -> some View {
+    private func cycleCardEmptyState(app: UsageApp, kind: QuotaLimitKind) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4) {
                 ServiceTile(app: app, size: 12)
@@ -173,6 +200,17 @@ struct CycleStatsView: View {
 
     // MARK: - 数据
 
+    private func projectSegments(_ summary: CycleUsageSummary, usedPercent: Double) -> [CycleProjectSegment] {
+        let usage = appState.usageService.cycleAggregator.usageByConversation(cycleID: summary.cycle.id)
+        let conversations = appState.usageService.conversationAggregator
+        return CycleProjectSplit.segments(
+            usage: usage,
+            usedPercent: usedPercent,
+            identity: { conversations.statsProjectIdentity(forConversationKey: $0) },
+            restName: tr("Other", "其他")
+        )
+    }
+
     private func currentSummary(
         app: UsageApp,
         kind: QuotaLimitKind
@@ -216,7 +254,7 @@ struct CycleStatsView: View {
         case .pi, .opencode:
             return nil
         case .dsh:
-            // DSH 没有额度周期，Cycles 不出现该服务。
+            // DSH 没有额度周期，额度页不出现该服务。
             return nil
         }
     }
@@ -226,9 +264,114 @@ struct CycleStatsView: View {
     }
 }
 
-// MARK: - 周期页共享的纯函数与子视图
+// MARK: - 周期按项目拆分
 
-/// 周期类型短标签：5 小时 / 周，用于 KPI 卡标签。
+struct CycleProjectSegment: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let role: CompositionColorRole
+    /// 占官方额度的估算百分比（0~100）。
+    let percent: Double
+    let tokens: Int
+}
+
+/// 周期进度条的项目估算（需求 §5）：
+/// `项目占用 ≈ 该项目本周期 API 等值 ÷ 该服务本周期 API 等值合计 × 官方已用比例`。
+/// 只用本机能归属到项目的用量；无明确项目、系统任务、旧版本没有对话信息的桶和第 3 名以后的项目并入「其他」。
+/// 本周期没有本机用量但官方已用 > 0（例如在其他设备上使用）时，整段显示为「其他」。
+/// 全部无价时按 Tokens 估算。各段之和恒等于官方已用比例。
+enum CycleProjectSplit {
+    static let namedLimit = 2
+
+    static func segments(
+        usage: [String?: UsageTotals],
+        usedPercent: Double,
+        identity: (String) -> StatsProjectIdentity?,
+        restName: String
+    ) -> [CycleProjectSegment] {
+        let used = max(0, min(100, usedPercent))
+        guard used > 0 else { return [] }
+
+        var projects: [String: (identity: StatsProjectIdentity, totals: UsageTotals)] = [:]
+        var total = UsageTotals.zero
+        var restTokens = 0
+        for (key, totals) in usage {
+            total.add(totals)
+            if let key, let project = identity(key), project.status.isPathBased {
+                var entry = projects[project.key] ?? (identity: project, totals: UsageTotals.zero)
+                entry.totals.add(totals)
+                projects[project.key] = entry
+            } else {
+                restTokens += totals.totalTokens
+            }
+        }
+
+        let useCost = total.costUSD > 0
+        func weight(_ totals: UsageTotals) -> Double {
+            useCost ? NSDecimalNumber(decimal: totals.costUSD).doubleValue : Double(totals.totalTokens)
+        }
+        let totalWeight = weight(total)
+        guard totalWeight > 0 else {
+            return [CycleProjectSegment(id: "rest", name: restName, role: .rest, percent: used, tokens: total.totalTokens)]
+        }
+
+        let ranked = projects.values
+            .filter { weight($0.totals) > 0 }
+            .sorted { lhs, rhs in
+                let l = weight(lhs.totals)
+                let r = weight(rhs.totals)
+                return l == r ? lhs.identity.name < rhs.identity.name : l > r
+            }
+        var segments: [CycleProjectSegment] = []
+        var namedPercent = 0.0
+        for (index, entry) in ranked.prefix(namedLimit).enumerated() {
+            let percent = used * weight(entry.totals) / totalWeight
+            namedPercent += percent
+            segments.append(CycleProjectSegment(
+                id: entry.identity.key,
+                name: entry.identity.name,
+                role: .rank(index),
+                percent: percent,
+                tokens: entry.totals.totalTokens
+            ))
+        }
+        let restPercent = max(0, used - namedPercent)
+        if restPercent > 0.0001 {
+            let otherTokens = restTokens + ranked.dropFirst(namedLimit).reduce(0) { $0 + $1.totals.totalTokens }
+            segments.append(CycleProjectSegment(id: "rest", name: restName, role: .rest, percent: restPercent, tokens: otherTokens))
+        }
+        return segments
+    }
+}
+
+/// 周期卡进度条：轨道底色 + 已用部分按项目分段，悬停分段显示项目名、估算比例与本周期 Tokens。
+private struct CycleProjectBar: View {
+    let segments: [CycleProjectSegment]
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.secondary.opacity(0.18))
+                HStack(spacing: 1) {
+                    ForEach(segments) { segment in
+                        CompositionFill(role: segment.role)
+                            .frame(width: max(1, proxy.size.width * segment.percent / 100))
+                            .help(tr(
+                                "\(segment.name) · ≈\(String(format: "%.1f", segment.percent))% · \(StatsFormatter.compactToken(segment.tokens)) tokens this cycle",
+                                "\(segment.name) · 约 \(String(format: "%.1f", segment.percent))% · 本周期 \(StatsFormatter.compactToken(segment.tokens)) Tokens"
+                            ))
+                    }
+                }
+                .clipShape(Capsule())
+            }
+        }
+        .frame(height: 6)
+    }
+}
+
+// MARK: - 周期卡共享的纯函数
+
+/// 周期类型短标签：5 小时 / 周，用于周期卡标签。
 private func cycleKindShort(_ kind: QuotaLimitKind) -> String {
     switch kind {
     case .fiveHour: return tr("5-hour", "5 小时")
@@ -237,7 +380,7 @@ private func cycleKindShort(_ kind: QuotaLimitKind) -> String {
     }
 }
 
-/// KPI 卡主数字：用满预估 `Tokens · 费用`，无依据的一侧显示 `—`。
+/// 周期卡主数字：用满预估 `Tokens · 费用`，无依据的一侧显示 `—`。
 private func fullUseLine(_ summary: CycleUsageSummary) -> String {
     let tokens = summary.projectedFullCycleTokens
         .map { StatsFormatter.compactToken($0) } ?? "—"

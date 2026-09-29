@@ -11,6 +11,11 @@ final class ConversationAggregator {
 
     @ObservationIgnored private var cachedQuery: (request: ConversationQueryRequest, result: ConversationQueryResult)?
     @ObservationIgnored private var cachedDetail: (revision: UInt64, key: String, detail: ConversationDetail)?
+    @ObservationIgnored private var cachedOverview: (request: ConversationOverviewRequest, result: ConversationOverviewResult)?
+    @ObservationIgnored private var cachedProjectDetail: (request: ProjectDetailRequest, detail: ProjectDetail?)?
+    /// worktree → 主仓库的只读识别，按路径缓存；只影响统计口径，不改写已保存的项目身份。
+    @ObservationIgnored private let worktreeResolver: ProjectWorktreeResolver
+    @ObservationIgnored private var identityCache: [IdentityCacheKey: ResolvedIdentity] = [:]
 
     private struct BucketKey: Hashable {
         let conversationKey: String
@@ -20,9 +25,24 @@ final class ConversationAggregator {
     }
 
     private struct ProjectAccumulator {
-        var info: ConversationInfo
+        var identity: StatsProjectIdentity
         var conversationCount: Int
         var lastAt: Date
+    }
+
+    private struct IdentityCacheKey: Hashable {
+        let projectKey: String
+        let status: ConversationProjectStatus
+    }
+
+    private struct ResolvedIdentity {
+        let identity: StatsProjectIdentity
+        /// 非 nil 表示该对话的项目路径是一个 worktree。
+        let worktree: ProjectWorktreeLink?
+    }
+
+    init(worktreeResolver: ProjectWorktreeResolver = ProjectWorktreeResolver()) {
+        self.worktreeResolver = worktreeResolver
     }
 
     var isEmpty: Bool { buckets.isEmpty }
@@ -181,13 +201,14 @@ final class ConversationAggregator {
                 rangeLastAt: rangeLastAt
             )
             allSummaries.append(summary)
-            if var project = projects[info.projectKey] {
+            let identity = resolvedIdentity(for: info).identity
+            if var project = projects[identity.key] {
                 project.conversationCount += 1
                 project.lastAt = max(project.lastAt, rangeLastAt)
-                projects[info.projectKey] = project
+                projects[identity.key] = project
             } else {
-                projects[info.projectKey] = ProjectAccumulator(
-                    info: info,
+                projects[identity.key] = ProjectAccumulator(
+                    identity: identity,
                     conversationCount: 1,
                     lastAt: rangeLastAt
                 )
@@ -196,10 +217,10 @@ final class ConversationAggregator {
 
         let projectOptions = projects.values.map {
             ConversationProjectOption(
-                key: $0.info.projectKey,
-                name: $0.info.projectName,
-                path: $0.info.projectPath,
-                status: $0.info.projectStatus,
+                key: $0.identity.key,
+                name: $0.identity.name,
+                path: $0.identity.path,
+                status: $0.identity.status,
                 conversationCount: $0.conversationCount,
                 lastAt: $0.lastAt
             )
@@ -210,7 +231,8 @@ final class ConversationAggregator {
             .compactMap { $0.value.count > 1 ? $0.key : nil }
 
         var rows = allSummaries.filter { summary in
-            if let projectKey = request.projectKey, summary.info.projectKey != projectKey { return false }
+            if let projectKey = request.projectKey,
+               resolvedIdentity(for: summary.info).identity.key != projectKey { return false }
             if !request.search.isEmpty {
                 let info = summary.info
                 let haystack = [info.title ?? "", info.projectName, info.projectPath, info.conversationID]
@@ -241,6 +263,297 @@ final class ConversationAggregator {
         )
         cachedQuery = (request, result)
         return result
+    }
+
+    /// 概览「用量构成 · 项目」「高消耗对话」与项目列表共用的汇总。范围内的桶只遍历一次。
+    /// 缺对话档案的桶不计入任何项目，由调用方算进「未归属」残差。
+    func overviewBreakdown(_ rawRequest: ConversationOverviewRequest) -> ConversationOverviewResult {
+        var request = rawRequest
+        request.revision = revision
+        if let cachedOverview, cachedOverview.request == request { return cachedOverview.result }
+
+        struct ProjectBuilder {
+            var identity: StatsProjectIdentity
+            var totals = UsageTotals.zero
+            var speed = UsageSpeedBreakdown()
+            var byApp: [UsageApp: UsageTotals] = [:]
+            var conversationCount = 0
+            var lastAt = Date.distantPast
+            var worktrees: Set<String> = []
+        }
+
+        var grouped: [String: [ConversationUsageBucket]] = [:]
+        var attributedByDayApp: [UsageDayAppKey: UsageTotals] = [:]
+        for bucket in buckets.values where bucket.day >= request.from && bucket.day < request.to {
+            guard request.apps.contains(bucket.app), infos[bucket.conversationKey] != nil else { continue }
+            grouped[bucket.conversationKey, default: []].append(bucket)
+            attributedByDayApp[UsageDayAppKey(day: bucket.day, app: bucket.app), default: .zero]
+                .add(Self.totals(of: bucket))
+        }
+
+        var projects: [String: ProjectBuilder] = [:]
+        var attributedByApp: [UsageApp: UsageTotals] = [:]
+        var conversations: [TopConversationRow] = []
+        conversations.reserveCapacity(grouped.count)
+        for (key, values) in grouped {
+            guard let info = infos[key] else { continue }
+            let item = aggregate(values)
+            var rangeLastAt = Date.distantPast
+            var modelNames: Set<String> = []
+            for value in values {
+                rangeLastAt = max(rangeLastAt, value.lastAt)
+                modelNames.insert(value.model)
+            }
+            let resolved = resolvedIdentity(for: info)
+            var project = projects[resolved.identity.key] ?? ProjectBuilder(identity: resolved.identity)
+            project.totals.add(item.totals)
+            project.speed.merge(item.speed)
+            project.byApp[info.app, default: .zero].add(item.totals)
+            project.conversationCount += 1
+            project.lastAt = max(project.lastAt, rangeLastAt)
+            if resolved.worktree != nil { project.worktrees.insert(info.projectPath) }
+            projects[resolved.identity.key] = project
+            attributedByApp[info.app, default: .zero].add(item.totals)
+            conversations.append(TopConversationRow(
+                summary: ConversationSummary(
+                    info: info,
+                    totals: item.totals,
+                    costs: item.costs,
+                    speed: item.speed,
+                    models: modelNames.sorted(),
+                    rangeLastAt: rangeLastAt
+                ),
+                project: resolved.identity
+            ))
+        }
+
+        let rows = projects.values.map {
+            ProjectUsageRow(
+                key: $0.identity.key,
+                name: $0.identity.name,
+                path: $0.identity.path,
+                status: $0.identity.status,
+                totals: $0.totals,
+                speed: $0.speed,
+                totalsByApp: $0.byApp,
+                conversationCount: $0.conversationCount,
+                lastAt: $0.lastAt,
+                worktreeCount: $0.worktrees.count
+            )
+        }
+        .sorted(by: Self.projectOrder)
+
+        conversations.sort { lhs, rhs in
+            if lhs.summary.costs.total == rhs.summary.costs.total {
+                return lhs.summary.rangeLastAt > rhs.summary.rangeLastAt
+            }
+            return lhs.summary.costs.total > rhs.summary.costs.total
+        }
+        let result = ConversationOverviewResult(
+            projects: rows,
+            attributedByApp: attributedByApp,
+            attributedByDayApp: attributedByDayApp,
+            topConversations: Array(conversations.prefix(max(0, request.topConversationLimit)))
+        )
+        cachedOverview = (request, result)
+        return result
+    }
+
+    /// 项目页右侧详情：所选范围的明细 + 全部时间合计。服务过滤与列表一致。
+    func projectDetail(_ rawRequest: ProjectDetailRequest) -> ProjectDetail? {
+        var request = rawRequest
+        request.revision = revision
+        if let cachedProjectDetail, cachedProjectDetail.request == request { return cachedProjectDetail.detail }
+
+        var identity: StatsProjectIdentity?
+        var totals = UsageTotals.zero
+        var previousTotals = UsageTotals.zero
+        var allTime = UsageTotals.zero
+        var firstDay: Date?
+        var daily: [UsageDayAppKey: UsageTotals] = [:]
+        var byApp: [UsageApp: UsageTotals] = [:]
+        var models: [String: ProjectModelUsage] = [:]
+        var activeDays: Set<Date> = []
+        var inRange: [String: [ConversationUsageBucket]] = [:]
+        var worktreeLinks: [String: ProjectWorktreeLink?] = [:]
+
+        for bucket in buckets.values where request.apps.contains(bucket.app) {
+            guard let info = infos[bucket.conversationKey] else { continue }
+            let resolved = resolvedIdentity(for: info)
+            guard resolved.identity.key == request.projectKey else { continue }
+            identity = identity ?? resolved.identity
+            let bucketTotals = Self.totals(of: bucket)
+            allTime.add(bucketTotals)
+            firstDay = min(firstDay ?? bucket.day, bucket.day)
+            if let previous = request.previous, previous.contains(bucket.day) {
+                previousTotals.add(bucketTotals)
+            }
+            guard bucket.day >= request.from && bucket.day < request.to else { continue }
+            totals.add(bucketTotals)
+            daily[UsageDayAppKey(day: bucket.day, app: bucket.app), default: .zero].add(bucketTotals)
+            byApp[bucket.app, default: .zero].add(bucketTotals)
+            var model = models[bucket.model] ?? ProjectModelUsage(model: bucket.model, apps: [], totals: .zero)
+            model.apps.insert(bucket.app)
+            model.totals.add(bucketTotals)
+            models[bucket.model] = model
+            activeDays.insert(bucket.day)
+            inRange[bucket.conversationKey, default: []].append(bucket)
+            if worktreeLinks[info.projectPath] == nil {
+                worktreeLinks[info.projectPath] = .some(resolved.worktree)
+            }
+        }
+
+        guard let identity else {
+            cachedProjectDetail = (request, nil)
+            return nil
+        }
+
+        var branches: [String: ProjectBranchUsage] = [:]
+        var worktreeTotals: [String: UsageTotals] = [:]
+        var conversations: [TopConversationRow] = []
+        for (key, values) in inRange {
+            guard let info = infos[key] else { continue }
+            let item = aggregate(values)
+            var rangeLastAt = Date.distantPast
+            var modelNames: Set<String> = []
+            for value in values {
+                rangeLastAt = max(rangeLastAt, value.lastAt)
+                modelNames.insert(value.model)
+            }
+            let branch = info.gitBranch.flatMap { $0.isEmpty ? nil : $0 }
+            var branchUsage = branches[branch ?? ""] ?? ProjectBranchUsage(branch: branch, conversationCount: 0, totals: .zero)
+            branchUsage.conversationCount += 1
+            branchUsage.totals.add(item.totals)
+            branches[branch ?? ""] = branchUsage
+            worktreeTotals[info.projectPath, default: .zero].add(item.totals)
+            conversations.append(TopConversationRow(
+                summary: ConversationSummary(
+                    info: info,
+                    totals: item.totals,
+                    costs: item.costs,
+                    speed: item.speed,
+                    models: modelNames.sorted(),
+                    rangeLastAt: rangeLastAt
+                ),
+                project: identity
+            ))
+        }
+        conversations.sort { lhs, rhs in
+            if lhs.summary.costs.total == rhs.summary.costs.total {
+                return lhs.summary.rangeLastAt > rhs.summary.rangeLastAt
+            }
+            return lhs.summary.costs.total > rhs.summary.costs.total
+        }
+
+        var worktrees: [ProjectWorktreeUsage] = []
+        if worktreeLinks.values.contains(where: { $0 != nil }) {
+            var mainTotals = UsageTotals.zero
+            for (path, link) in worktreeLinks {
+                let pathTotals = worktreeTotals[path] ?? .zero
+                if let link {
+                    worktrees.append(ProjectWorktreeUsage(path: path, branch: link.branch, isMain: false, totals: pathTotals))
+                } else {
+                    mainTotals.add(pathTotals)
+                }
+            }
+            worktrees.sort { lhs, rhs in
+                lhs.totals.costUSD == rhs.totals.costUSD ? lhs.path < rhs.path : lhs.totals.costUSD > rhs.totals.costUSD
+            }
+            worktrees.insert(ProjectWorktreeUsage(
+                path: identity.path,
+                branch: worktreeResolver.currentBranch(ofRepository: identity.path),
+                isMain: true,
+                totals: mainTotals
+            ), at: 0)
+        }
+
+        let detail = ProjectDetail(
+            project: identity,
+            totals: totals,
+            previousTotals: request.previous == nil ? nil : previousTotals,
+            conversationCount: inRange.count,
+            activeDays: activeDays.count,
+            dailyByApp: daily,
+            totalsByApp: byApp,
+            models: models.values.sorted { lhs, rhs in
+                lhs.totals.costUSD == rhs.totals.costUSD ? lhs.model < rhs.model : lhs.totals.costUSD > rhs.totals.costUSD
+            },
+            branches: branches.values.sorted { lhs, rhs in
+                if (lhs.branch == nil) != (rhs.branch == nil) { return lhs.branch != nil }
+                if lhs.totals.costUSD == rhs.totals.costUSD { return (lhs.branch ?? "") < (rhs.branch ?? "") }
+                return lhs.totals.costUSD > rhs.totals.costUSD
+            },
+            topConversations: conversations,
+            worktrees: worktrees,
+            allTimeTotals: allTime,
+            firstUsedDay: firstDay
+        )
+        cachedProjectDetail = (request, detail)
+        return detail
+    }
+
+    /// 对话在统计页里的项目身份（worktree 折算到主仓库）。对话页的项目菜单与筛选也用它。
+    func statsProjectIdentity(for info: ConversationInfo) -> StatsProjectIdentity {
+        resolvedIdentity(for: info).identity
+    }
+
+    /// 该路径下是否为 Git 仓库；受保护路径返回 nil（未检查）。
+    func isGitRepository(_ path: String) -> Bool? {
+        worktreeResolver.isGitRepository(path)
+    }
+
+    /// 周期拆分用：对话 key → 统计页项目身份；缺档案时返回 nil。
+    func statsProjectIdentity(forConversationKey key: String) -> StatsProjectIdentity? {
+        infos[key].map { resolvedIdentity(for: $0).identity }
+    }
+
+    /// 项目排序：API 等值降序，同值按名称；无明确项目与系统任务固定在最后。
+    nonisolated static func projectOrder(_ lhs: ProjectUsageRow, _ rhs: ProjectUsageRow) -> Bool {
+        if lhs.isSpecial != rhs.isSpecial { return !lhs.isSpecial }
+        if lhs.totals.costUSD == rhs.totals.costUSD {
+            if lhs.name == rhs.name { return lhs.key < rhs.key }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+        return lhs.totals.costUSD > rhs.totals.costUSD
+    }
+
+    private func resolvedIdentity(for info: ConversationInfo) -> ResolvedIdentity {
+        let cacheKey = IdentityCacheKey(projectKey: info.projectKey, status: info.projectStatus)
+        if let cached = identityCache[cacheKey] { return cached }
+        let base = StatsProjectIdentity(
+            key: info.projectKey,
+            name: info.projectName,
+            path: info.projectPath,
+            status: info.projectStatus
+        )
+        let resolved: ResolvedIdentity
+        if info.projectStatus == .available, let link = worktreeResolver.link(forProjectPath: info.projectPath) {
+            resolved = ResolvedIdentity(
+                identity: StatsProjectIdentity(
+                    key: "path:\(link.mainPath)",
+                    name: URL(fileURLWithPath: link.mainPath).lastPathComponent,
+                    path: link.mainPath,
+                    status: .available
+                ),
+                worktree: link
+            )
+        } else {
+            resolved = ResolvedIdentity(identity: base, worktree: nil)
+        }
+        identityCache[cacheKey] = resolved
+        return resolved
+    }
+
+    private nonisolated static func totals(of bucket: ConversationUsageBucket) -> UsageTotals {
+        var totals = UsageTotals.zero
+        totals.inputTokens = bucket.inputTokens
+        totals.outputTokens = bucket.outputTokens
+        totals.cacheReadTokens = bucket.cacheReadTokens
+        totals.cacheCreationTokens = bucket.cacheCreationTokens
+        totals.costUSD = bucket.costUSD
+        totals.requestCount = bucket.requestCount
+        totals.hasUnpricedUsage = bucket.hasUnpricedUsage
+        return totals
     }
 
     func detail(key: String) -> ConversationDetail? {
@@ -360,5 +673,9 @@ final class ConversationAggregator {
         revision &+= 1
         cachedQuery = nil
         cachedDetail = nil
+        cachedOverview = nil
+        cachedProjectDetail = nil
+        // 路径状态（worktree 新建 / 删除）可能随扫描变化；身份映射随数据版本一起重算。
+        identityCache.removeAll(keepingCapacity: true)
     }
 }

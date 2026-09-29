@@ -110,8 +110,10 @@
 		49C1B163000000000001AABB /* DesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1B163000000000001AAAA /* DesignSystem.swift */; };
 		49C1B164000000000001AABB /* ConversationStatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1B164000000000001AAAA /* ConversationStatsView.swift */; };
 		49C1BA12000000000001AABB /* CycleStatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1BA12000000000001AAAA /* CycleStatsView.swift */; };
+		49C1BB02000000000001AABB /* ProjectStatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1BB02000000000001AAAA /* ProjectStatsView.swift */; };
 		49C1B165000000000001AABB /* ConversationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1B165000000000001AAAA /* ConversationModels.swift */; };
 		49C1B166000000000001AABB /* ConversationAggregator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1B166000000000001AAAA /* ConversationAggregator.swift */; };
+		49C1BB01000000000001AABB /* ProjectWorktreeResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1BB01000000000001AAAA /* ProjectWorktreeResolver.swift */; };
 		49C1B167000000000001AABB /* ConversationTitleIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1B167000000000001AAAA /* ConversationTitleIndex.swift */; };
 		49C1B168000000000001AABB /* ConversationRollupCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1B168000000000001AAAA /* ConversationRollupCache.swift */; };
 		49C1B171000000000001AABB /* FloatingPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1B171000000000001AAAA /* FloatingPanel.swift */; };
@@ -130,6 +132,7 @@
 		49C1B31000000000000FAABB /* PiJSONLScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1B31000000000000FAAAA /* PiJSONLScannerTests.swift */; };
 		49C1B91000000000000FAABB /* OpencodeScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1B91000000000000FAAAA /* OpencodeScannerTests.swift */; };
 		49C1BF0A000000000001AABB /* ConversationProjectResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1BF0A000000000001AAAA /* ConversationProjectResolverTests.swift */; };
+		49C1BB03000000000001AABB /* ProjectUsageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C1BB03000000000001AAAA /* ProjectUsageTests.swift */; };
 		49C1B3F3000000000001AABB /* codex-fast-scan.jsonl in Resources */ = {isa = PBXBuildFile; fileRef = 49C1B3F0000000000001AAAA /* codex-fast-scan.jsonl */; };
 		49C1B3F4000000000001AABB /* claude-fast-scan.jsonl in Resources */ = {isa = PBXBuildFile; fileRef = 49C1B3F1000000000001AAAA /* claude-fast-scan.jsonl */; };
 /* End PBXBuildFile section */
@@ -250,8 +253,10 @@
 		49C1B163000000000001AAAA /* DesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignSystem.swift; sourceTree = "<group>"; };
 		49C1B164000000000001AAAA /* ConversationStatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationStatsView.swift; sourceTree = "<group>"; };
 		49C1BA12000000000001AAAA /* CycleStatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CycleStatsView.swift; sourceTree = "<group>"; };
+		49C1BB02000000000001AAAA /* ProjectStatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectStatsView.swift; sourceTree = "<group>"; };
 		49C1B165000000000001AAAA /* ConversationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationModels.swift; sourceTree = "<group>"; };
 		49C1B166000000000001AAAA /* ConversationAggregator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationAggregator.swift; sourceTree = "<group>"; };
+		49C1BB01000000000001AAAA /* ProjectWorktreeResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectWorktreeResolver.swift; sourceTree = "<group>"; };
 		49C1B167000000000001AAAA /* ConversationTitleIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTitleIndex.swift; sourceTree = "<group>"; };
 		49C1B168000000000001AAAA /* ConversationRollupCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRollupCache.swift; sourceTree = "<group>"; };
 		49C1B171000000000001AAAA /* FloatingPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingPanel.swift; sourceTree = "<group>"; };
@@ -270,6 +275,7 @@
 		49C1B31000000000000FAAAA /* PiJSONLScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiJSONLScannerTests.swift; sourceTree = "<group>"; };
 		49C1B91000000000000FAAAA /* OpencodeScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpencodeScannerTests.swift; sourceTree = "<group>"; };
 		49C1BF0A000000000001AAAA /* ConversationProjectResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationProjectResolverTests.swift; sourceTree = "<group>"; };
+		49C1BB03000000000001AAAA /* ProjectUsageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectUsageTests.swift; sourceTree = "<group>"; };
 		49C1B301000000000001AAAA /* CCBarTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CCBarTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		49C1B3F0000000000001AAAA /* codex-fast-scan.jsonl */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "codex-fast-scan.jsonl"; sourceTree = "<group>"; };
 		49C1B3F1000000000001AAAA /* claude-fast-scan.jsonl */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "claude-fast-scan.jsonl"; sourceTree = "<group>"; };
@@ -491,6 +497,7 @@
 				49C1BA11000000000001AAAA /* CycleUsage.swift */,
 				49C1B165000000000001AAAA /* ConversationModels.swift */,
 				49C1B166000000000001AAAA /* ConversationAggregator.swift */,
+				49C1BB01000000000001AAAA /* ProjectWorktreeResolver.swift */,
 				49C1B167000000000001AAAA /* ConversationTitleIndex.swift */,
 			);
 			path = Usage;
@@ -505,6 +512,7 @@
 				49C1B163000000000001AAAA /* DesignSystem.swift */,
 				49C1B164000000000001AAAA /* ConversationStatsView.swift */,
 				49C1BA12000000000001AAAA /* CycleStatsView.swift */,
+				49C1BB02000000000001AAAA /* ProjectStatsView.swift */,
 			);
 			path = Main;
 			sourceTree = "<group>";
@@ -551,6 +559,7 @@
 				49C1BE1A000000000001AAAA /* DshPricingTests.swift */,
 				49C1BE1C000000000001AAAA /* DshDiagnosticsTests.swift */,
 				49C1BF0A000000000001AAAA /* ConversationProjectResolverTests.swift */,
+				49C1BB03000000000001AAAA /* ProjectUsageTests.swift */,
 				49C1BF09000000000001AAAA /* UpdateCheckerTests.swift */,
 				49C2AA07000000000001AAAA /* UsageSnapshotStoreTests.swift */,
 				49C2AA09000000000001AAAA /* UsageHistoryRecoveryTests.swift */,
@@ -768,8 +777,10 @@
 				49C1B163000000000001AABB /* DesignSystem.swift in Sources */,
 				49C1B164000000000001AABB /* ConversationStatsView.swift in Sources */,
 				49C1BA12000000000001AABB /* CycleStatsView.swift in Sources */,
+				49C1BB02000000000001AABB /* ProjectStatsView.swift in Sources */,
 				49C1B165000000000001AABB /* ConversationModels.swift in Sources */,
 				49C1B166000000000001AABB /* ConversationAggregator.swift in Sources */,
+				49C1BB01000000000001AABB /* ProjectWorktreeResolver.swift in Sources */,
 				49C1B167000000000001AABB /* ConversationTitleIndex.swift in Sources */,
 				49C1B168000000000001AABB /* ConversationRollupCache.swift in Sources */,
 				49C1B171000000000001AABB /* FloatingPanel.swift in Sources */,
@@ -814,6 +825,7 @@
 				49C1BE1B000000000001AAAA /* DshPricingTests.swift in Sources */,
 				49C1BE1D000000000001AAAA /* DshDiagnosticsTests.swift in Sources */,
 				49C1BF0A000000000001AABB /* ConversationProjectResolverTests.swift in Sources */,
+				49C1BB03000000000001AABB /* ProjectUsageTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

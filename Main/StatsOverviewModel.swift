@@ -33,6 +33,9 @@ struct StatsOverviewInput: Equatable {
     let visibleApps: [UsageApp]
     /// 上下文窗口模式下唯一全彩的那根柱子的周期起点；非上下文模式为 nil。
     let highlightedPeriodStart: Date?
+    /// `ConversationAggregator.revision`：项目构成与高消耗对话来自对话聚合，
+    /// 它变化时也要重新派生。
+    var conversationRevision: UInt64 = 0
 }
 
 // MARK: - Model
@@ -53,8 +56,14 @@ struct StatsOverviewModel {
     /// 固定柱宽：周期很少时避免柱子被自动撑满绘图区，周期多时调窄。
     let barWidth: CGFloat
     let highlightedPeriodStart: Date?
-    /// 未排序的提供商分组；排序键在面板里切换，见 `ProviderGroup.sorted(_:by:)`。
+    /// 未排序的提供商分组，见 `ProviderGroup.sorted(_:by:)`。
     let providerGroups: [ProviderGroup]
+    /// 「用量构成」四个维度的行，已按 API 等值排序并做好合并。
+    let composition: [CompositionDimension: [CompositionRow]]
+    /// 概览总量里无法归属到项目的部分（Cursor 远端、补录、早期历史等）。
+    let unattributed: UsageTotals
+    /// 按 API 等值取前 5 的对话。
+    let topConversations: [TopConversationRow]
 
     private let totalsByApp: [UsageApp: UsageTotals]
     private let previousTotalsByApp: [UsageApp: UsageTotals]
@@ -85,7 +94,30 @@ struct StatsOverviewModel {
         samples.first { $0.key == key }
     }
 
-    static func build(buckets: [UsageBucket], input: StatsOverviewInput) -> StatsOverviewModel {
+    /// 占比口径：有金额时按 API 等值，全部无价时退回按 Tokens。
+    var sharesUseCost: Bool { totalsAll.costUSD > 0 }
+
+    /// 某行在当前合计里的占比，0~1。
+    func share(of totals: UsageTotals) -> Double {
+        if sharesUseCost {
+            return NSDecimalNumber(decimal: totals.costUSD / totalsAll.costUSD).doubleValue
+        }
+        guard totalsAll.totalTokens > 0 else { return 0 }
+        return Double(totals.totalTokens) / Double(totalsAll.totalTokens)
+    }
+
+    /// 前 N 个高消耗对话合计占概览 API 等值的比例；概览无金额时为 nil。
+    var topConversationsCostShare: Double? {
+        guard totalsAll.costUSD > 0, !topConversations.isEmpty else { return nil }
+        let sum = topConversations.reduce(Decimal(0)) { $0 + $1.summary.costs.total }
+        return min(1, NSDecimalNumber(decimal: sum / totalsAll.costUSD).doubleValue)
+    }
+
+    static func build(
+        buckets: [UsageBucket],
+        input: StatsOverviewInput,
+        conversationOverview: ConversationOverviewResult = .empty
+    ) -> StatsOverviewModel {
         let visible = Set(input.visibleApps)
         let serviceApp = input.serviceApp
 
@@ -164,6 +196,19 @@ struct StatsOverviewModel {
             samples[index].key = StatsPeriodKey.key(for: samples[index].day)
         }
 
+        let providerGroups = Array(groupsByProvider.values)
+        var unattributed = UsageTotals.zero
+        for (app, totals) in totalsByApp {
+            unattributed.add(totals.clampedSubtracting(conversationOverview.attributedByApp[app] ?? .zero))
+        }
+        let serviceApps = input.visibleApps.filter { serviceApp == nil || $0 == serviceApp }
+        let composition: [CompositionDimension: [CompositionRow]] = [
+            .service: CompositionBuilder.serviceRows(apps: serviceApps, totals: totalsByApp, speed: speedByApp),
+            .provider: CompositionBuilder.providerRows(providerGroups),
+            .model: CompositionBuilder.modelRows(modelsByApp),
+            .project: CompositionBuilder.projectRows(conversationOverview.projects, unattributed: unattributed)
+        ]
+
         return StatsOverviewModel(
             visibleApps: input.visibleApps,
             hasPreviousRange: input.previous != nil,
@@ -173,7 +218,10 @@ struct StatsOverviewModel {
             samples: samples,
             barWidth: barWidth(forSampleCount: samples.count),
             highlightedPeriodStart: input.highlightedPeriodStart,
-            providerGroups: Array(groupsByProvider.values),
+            providerGroups: providerGroups,
+            composition: composition,
+            unattributed: unattributed,
+            topConversations: conversationOverview.topConversations,
             totalsByApp: totalsByApp,
             previousTotalsByApp: previousTotalsByApp,
             speedByApp: speedByApp,
@@ -193,7 +241,7 @@ struct StatsOverviewModel {
 
     /// 柱宽用固定值而非交给 Swift Charts 自动计算——天数很少(极端情况只有 1 天)时,
     /// 自动宽度会把柱子撑到接近整个绘图区;天数越多则相应调窄,避免拥挤。
-    private static func barWidth(forSampleCount count: Int) -> CGFloat {
+    static func barWidth(forSampleCount count: Int) -> CGFloat {
         switch count {
         case 0...3: return 28
         case 4...14: return 18
@@ -221,14 +269,287 @@ final class StatsOverviewCache {
 
     func model(
         for input: StatsOverviewInput,
-        buckets: () -> [UsageBucket]
+        buckets: () -> [UsageBucket],
+        conversationOverview: () -> ConversationOverviewResult = { .empty }
     ) -> StatsOverviewModel {
         if let model, self.input == input { return model }
-        let built = StatsOverviewModel.build(buckets: buckets(), input: input)
+        let built = StatsOverviewModel.build(
+            buckets: buckets(),
+            input: input,
+            conversationOverview: conversationOverview()
+        )
         self.input = input
         self.model = built
         return built
     }
+}
+
+// MARK: - Composition（用量构成）
+
+/// 「用量构成」面板的维度，默认「服务」。
+enum CompositionDimension: CaseIterable, Hashable {
+    case service
+    case provider
+    case model
+    case project
+}
+
+/// 行首色块的配色角色；具体颜色在视图层按深浅色解析。
+enum CompositionColorRole: Equatable {
+    /// 服务维度沿用服务识别色。
+    case service(UsageApp)
+    /// 非服务维度按排名套紫色色阶，0 为第 1 名。
+    case rank(Int)
+    /// 「其他 / 其余」固定中性灰。
+    case rest
+    /// 「未归属」固定灰色斜纹。
+    case unattributed
+}
+
+enum CompositionRowKind: Equatable {
+    case item
+    /// 合并行；`count` 为被合并的项数（提供商维度不显示数量）。
+    case rest(count: Int)
+    case unattributed
+}
+
+enum CompositionAction: Equatable {
+    case none
+    case selectService(UsageApp)
+    case expandProvider(ModelProvider)
+    case openProject(String)
+    case openUnattributed
+}
+
+struct CompositionRow: Identifiable {
+    let id: String
+    let kind: CompositionRowKind
+    /// 名称；合并行 / 未归属由视图按 `kind` 本地化，这里为空。
+    let title: String
+    let subtitle: String
+    let color: CompositionColorRole
+    let totals: UsageTotals
+    /// 未归属只有 Tokens 与金额，没有速度拆分。
+    let speed: UsageSpeedBreakdown?
+    let action: CompositionAction
+    /// 提供商行就地展开的模型明细。
+    var providerModels: [ProviderModelRow] = []
+    /// 模型行的来源服务 / 提供商行的来源服务。
+    var apps: [UsageApp] = []
+}
+
+/// 四个维度的合并规则（需求 §3.1）：服务全部列出；提供商前 3 + 其他；
+/// 模型前 5 + 其余 N 个模型；项目前 4 + 其余 N 个项目 + 未归属。
+/// 都按 API 等值降序，同值按名称；合并行与未归属固定在最后。
+enum CompositionBuilder {
+    static let providerLimit = 3
+    static let modelLimit = 5
+    static let projectLimit = 4
+
+    static func serviceRows(
+        apps: [UsageApp],
+        totals: [UsageApp: UsageTotals],
+        speed: [UsageApp: UsageSpeedBreakdown]
+    ) -> [CompositionRow] {
+        let order = Dictionary(uniqueKeysWithValues: apps.enumerated().map { ($1, $0) })
+        return apps
+            .sorted { lhs, rhs in
+                let l = totals[lhs]?.costUSD ?? 0
+                let r = totals[rhs]?.costUSD ?? 0
+                if l == r { return (order[lhs] ?? 0) < (order[rhs] ?? 0) }
+                return l > r
+            }
+            .map { app in
+                CompositionRow(
+                    id: "service:\(app.rawValue)",
+                    kind: .item,
+                    title: app.displayName,
+                    subtitle: serviceSubtitle(app),
+                    color: .service(app),
+                    totals: totals[app] ?? .zero,
+                    speed: speed[app] ?? UsageSpeedBreakdown(),
+                    action: .selectService(app),
+                    apps: [app]
+                )
+            }
+    }
+
+    static func providerRows(_ groups: [ProviderGroup]) -> [CompositionRow] {
+        let sorted = ProviderGroup.sorted(groups, by: .cost)
+        let ranked = sorted.filter { $0.provider != .other }
+        let top = Array(ranked.prefix(providerLimit))
+        let restGroups = sorted.filter { group in !top.contains { $0.provider == group.provider } }
+        var rows = top.enumerated().map { index, group in
+            CompositionRow(
+                id: "provider:\(group.provider.rawValue)",
+                kind: .item,
+                title: group.provider.displayName,
+                subtitle: UsageApp.allCases.filter { group.sources.contains($0) }.map(\.displayName).joined(separator: " · "),
+                color: .rank(index),
+                totals: group.totals,
+                speed: group.speed,
+                action: .expandProvider(group.provider),
+                providerModels: group.models,
+                apps: UsageApp.allCases.filter { group.sources.contains($0) }
+            )
+        }
+        if let rest = mergedRest(restGroups.map { ($0.totals, $0.speed) }) {
+            rows.append(CompositionRow(
+                id: "provider:rest",
+                kind: .rest(count: restGroups.count),
+                title: "",
+                subtitle: restGroups.map(\.provider.displayName).joined(separator: " · "),
+                color: .rest,
+                totals: rest.totals,
+                speed: rest.speed,
+                action: .none
+            ))
+        }
+        return rows
+    }
+
+    static func modelRows(
+        _ modelsByApp: [UsageApp: [String: (totals: UsageTotals, speed: UsageSpeedBreakdown)]]
+    ) -> [CompositionRow] {
+        struct Merged {
+            var totals = UsageTotals.zero
+            var speed = UsageSpeedBreakdown()
+            var apps: Set<UsageApp> = []
+            var providers: Set<ModelProvider> = []
+        }
+        var merged: [String: Merged] = [:]
+        for (app, models) in modelsByApp {
+            for (model, item) in models {
+                var value = merged[model] ?? Merged()
+                value.totals.add(item.totals)
+                value.speed.merge(item.speed)
+                value.apps.insert(app)
+                value.providers.insert(ModelProvider.resolve(app: app, model: model))
+                merged[model] = value
+            }
+        }
+        let sorted = merged.sorted { lhs, rhs in
+            lhs.value.totals.costUSD == rhs.value.totals.costUSD
+                ? lhs.key < rhs.key
+                : lhs.value.totals.costUSD > rhs.value.totals.costUSD
+        }
+        let top = sorted.prefix(modelLimit)
+        var rows = top.enumerated().map { index, element in
+            let apps = UsageApp.allCases.filter { element.value.apps.contains($0) }
+            let providers = ModelProvider.allCases.filter { element.value.providers.contains($0) }
+            return CompositionRow(
+                id: "model:\(element.key)",
+                kind: .item,
+                title: element.key,
+                subtitle: (providers.map(\.displayName) + apps.map(\.displayName)).joined(separator: " · "),
+                color: .rank(index),
+                totals: element.value.totals,
+                speed: element.value.speed,
+                action: .none,
+                apps: apps
+            )
+        }
+        let rest = sorted.dropFirst(modelLimit)
+        if let merged = mergedRest(rest.map { ($0.value.totals, $0.value.speed) }) {
+            rows.append(CompositionRow(
+                id: "model:rest",
+                kind: .rest(count: rest.count),
+                title: "",
+                subtitle: "",
+                color: .rest,
+                totals: merged.totals,
+                speed: merged.speed,
+                action: .none
+            ))
+        }
+        return rows
+    }
+
+    /// `projects` 需已按 `ConversationAggregator.projectOrder` 排好（特殊项目在最后）。
+    static func projectRows(_ projects: [ProjectUsageRow], unattributed: UsageTotals) -> [CompositionRow] {
+        let ranked = projects.filter { !$0.isSpecial }
+        let top = Array(ranked.prefix(projectLimit))
+        let restProjects = projects.filter { project in !top.contains { $0.key == project.key } }
+        var rows = top.enumerated().map { index, project in
+            CompositionRow(
+                id: "project:\(project.key)",
+                kind: .item,
+                title: project.name,
+                subtitle: pathTail(project.path),
+                color: .rank(index),
+                totals: project.totals,
+                speed: project.speed,
+                action: .openProject(project.key),
+                apps: UsageApp.allCases.filter { project.totalsByApp[$0]?.hasUsage == true }
+            )
+        }
+        if let merged = mergedRest(restProjects.map { ($0.totals, $0.speed) }) {
+            rows.append(CompositionRow(
+                id: "project:rest",
+                kind: .rest(count: restProjects.count),
+                title: "",
+                subtitle: "",
+                color: .rest,
+                totals: merged.totals,
+                speed: merged.speed,
+                action: .none
+            ))
+        }
+        if unattributed.hasUsage {
+            rows.append(CompositionRow(
+                id: "project:unattributed",
+                kind: .unattributed,
+                title: "",
+                subtitle: "",
+                color: .unattributed,
+                totals: unattributed,
+                speed: nil,
+                action: .openUnattributed
+            ))
+        }
+        return rows
+    }
+
+    /// 路径尾段（最后两级），用作项目副标。
+    static func pathTail(_ path: String) -> String {
+        let parts = path.split(separator: "/")
+        guard parts.count > 1 else { return path }
+        return "…/" + parts.suffix(2).joined(separator: "/")
+    }
+
+    static func serviceSubtitle(_ app: UsageApp) -> String {
+        switch app {
+        case .codex: return "OpenAI"
+        case .claude: return "Anthropic"
+        case .cursor: return "Cursor"
+        case .pi: return "pi.dev"
+        case .opencode: return "opencode.ai"
+        case .dsh: return "DeepSeek Harness"
+        }
+    }
+
+    private static func mergedRest(
+        _ items: [(UsageTotals, UsageSpeedBreakdown)]
+    ) -> (totals: UsageTotals, speed: UsageSpeedBreakdown)? {
+        guard !items.isEmpty else { return nil }
+        var totals = UsageTotals.zero
+        var speed = UsageSpeedBreakdown()
+        for (itemTotals, itemSpeed) in items {
+            totals.add(itemTotals)
+            speed.merge(itemSpeed)
+        }
+        return totals.hasUsage ? (totals, speed) : nil
+    }
+}
+
+/// 「提供商」分组的排序键；用量构成统一按 API 等值（`.cost`），其余键保留给测试与后续使用。
+enum ProviderSort: CaseIterable, Identifiable {
+    case cost
+    case tokens
+    case requests
+    case name
+
+    var id: Self { self }
 }
 
 // MARK: - Row models
