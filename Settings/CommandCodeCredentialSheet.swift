@@ -105,7 +105,7 @@ struct CommandCodeCredentialSheet: View {
                 }
 
                 if let login = appState.commandCodeAccount?.login {
-                    Text(tr("Account: \(login)", "当前账号：\(login)"))
+                    Text(PrivacyDisplay.isEnabled ? PrivacyDisplay.account("primary:commandCode") : tr("Account: \(login)", "当前账号：\(login)"))
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - ImportedCodexAccountsView
@@ -76,7 +77,8 @@ struct ImportedCodexAccountsView: View {
         }
         .sheet(item: $selectedResetAccount) { account in
             CodexResetCreditsSheet(
-                accountTitle: rowTitle(account),
+                accountTitle: rowTitle(account, respectsPrivacy: false),
+                privacyAccountKey: account.id,
                 fetchCredits: { await appState.fetchImportedCodexResetCredits(account: account) }
             )
         }
@@ -189,7 +191,8 @@ struct ImportedCodexAccountsView: View {
         .padding(.horizontal, 14)
     }
 
-    private func rowTitle(_ account: ImportedCodexAccount) -> String {
+    private func rowTitle(_ account: ImportedCodexAccount, respectsPrivacy: Bool = true) -> String {
+        if respectsPrivacy && PrivacyDisplay.isEnabled { return PrivacyDisplay.account(account.id) }
         if !account.alias.isEmpty { return account.alias }
         if let email = account.email, !email.isEmpty {
             return email.components(separatedBy: "@").first ?? email
@@ -199,7 +202,7 @@ struct ImportedCodexAccountsView: View {
 
     private func importedAccountDetail(_ account: ImportedCodexAccount) -> String {
         var parts: [String] = []
-        if let email = account.email, !email.isEmpty { parts.append(email) }
+        if !PrivacyDisplay.isEnabled, let email = account.email, !email.isEmpty { parts.append(email) }
         if let plan = account.planType, !plan.isEmpty { parts.append(plan.capitalized) }
         return parts.joined(separator: " · ")
     }
@@ -298,7 +301,7 @@ struct AddImportedCodexAccountSheet: View {
                     if parsedBatch != nil || patToken != nil { formSection }
                     // 错误
                     if let err = parseError ?? saveError {
-                        Text(err)
+                        Text(PrivacyDisplay.error(err))
                             .font(.system(size: 11.5))
                             .foregroundStyle(.red)
                             .padding(.horizontal, 2)
@@ -343,7 +346,23 @@ struct AddImportedCodexAccountSheet: View {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
 
-            TextEditor(text: $jsonText)
+            Group {
+                if PrivacyDisplay.isEnabled {
+                    VStack(spacing: 10) {
+                        Text(jsonText.isEmpty
+                             ? tr("Credentials stay hidden in privacy mode", "隐私模式下不显示凭据内容")
+                             : tr("Pasted credentials are hidden", "已粘贴的凭据内容已隐藏"))
+                            .foregroundStyle(.secondary)
+                        Button(tr("Paste credentials", "粘贴凭据")) {
+                            jsonText = NSPasteboard.general.string(forType: .string) ?? ""
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    TextEditor(text: $jsonText)
+                }
+            }
                 .font(.system(size: 11, design: .monospaced))
                 .frame(height: 120)
                 .padding(6)
@@ -371,7 +390,7 @@ struct AddImportedCodexAccountSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     if let email = p.email {
-                        Text(email)
+                        Text(PrivacyDisplay.isEnabled ? PrivacyDisplay.account(p.id) : email)
                             .font(.system(size: 12, weight: .semibold))
                     }
                     if let plan = p.planType {
@@ -384,7 +403,10 @@ struct AddImportedCodexAccountSheet: View {
                             .clipShape(Capsule())
                     }
                 }
-                Text("ID: \(p.chatgptAccountId)")
+                HStack(spacing: 4) {
+                    Text("ID:")
+                    PrivacySensitiveText(text: p.chatgptAccountId, kind: .identifier)
+                }
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -443,7 +465,7 @@ struct AddImportedCodexAccountSheet: View {
                 ForEach(Array(batch.enumerated()), id: \.element.id) { idx, p in
                     HStack(spacing: 8) {
                         if let email = p.email {
-                            Text(email)
+                            Text(PrivacyDisplay.isEnabled ? PrivacyDisplay.account(p.id) : email)
                                 .font(.system(size: 11.5))
                                 .lineLimit(1)
                         }
@@ -457,7 +479,7 @@ struct AddImportedCodexAccountSheet: View {
                                 .clipShape(Capsule())
                         }
                         Spacer()
-                        Text(p.chatgptAccountId)
+                        PrivacySensitiveText(text: p.chatgptAccountId, kind: .identifier)
                             .font(.system(size: 9.5, design: .monospaced))
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)

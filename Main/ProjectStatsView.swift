@@ -322,7 +322,7 @@ struct ProjectStatsView: View {
     private func listRows(_ projects: [ProjectUsageRow]) -> [ProjectUsageRow] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let filtered = query.isEmpty ? projects : projects.filter { row in
-            "\(StatsProjectLabel.name(StatsProjectIdentity(key: row.key, name: row.name, path: row.path, status: row.status))) \(row.path)"
+            "\(row.isSpecial ? StatsProjectLabel.name(StatsProjectIdentity(key: row.key, name: row.name, path: row.path, status: row.status)) : row.name) \(row.path)"
                 .lowercased()
                 .contains(query)
         }
@@ -404,7 +404,7 @@ private struct ProjectListRow: View {
                     .monospacedDigit()
             }
             HStack(spacing: 6) {
-                Text(subtitle)
+                PrivacySensitiveText(text: subtitle, sensitive: row.status.isPathBased)
                     .font(.system(size: 10.5))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -614,7 +614,7 @@ private struct ProjectDetailView: View {
                     ProjectBadge(text: tr("Unavailable", "已不存在"))
                 }
                 Spacer()
-                if detail.project.status == .available || detail.project.status == .unverified {
+                if !PrivacyDisplay.isEnabled && (detail.project.status == .available || detail.project.status == .unverified) {
                     Button(tr("Show in Finder", "在访达中显示")) {
                         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: detail.project.path)])
                     }
@@ -622,7 +622,7 @@ private struct ProjectDetailView: View {
                 }
             }
             if detail.project.status.isPathBased {
-                Text(detail.project.path)
+                PrivacySensitiveText(text: detail.project.path)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -772,7 +772,7 @@ private struct ProjectDetailView: View {
             ForEach(rows) { branch in
                 Divider()
                 HStack {
-                    Text(branch.branch ?? tr("(no branch info)", "（无分支信息）"))
+                    PrivacySensitiveText(text: branch.branch ?? tr("(no branch info)", "（无分支信息）"), kind: .branch, sensitive: branch.branch != nil)
                         .font(.system(size: 11.5, design: branch.branch == nil ? .default : .monospaced))
                         .foregroundStyle(branch.branch == nil ? Color.secondary : Color.primary)
                         .lineLimit(1)
@@ -874,13 +874,13 @@ private struct ProjectDetailView: View {
                         .frame(width: 14)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
-                            Text(item.path)
+                            PrivacySensitiveText(text: item.path)
                                 .font(.system(size: 11, design: .monospaced))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             if item.isMain { ProjectBadge(text: tr("Main repository", "主仓库")) }
                         }
-                        Text(item.branch ?? tr("(branch unknown)", "（分支未知）"))
+                        PrivacySensitiveText(text: item.branch ?? tr("(branch unknown)", "（分支未知）"), kind: .branch, sensitive: item.branch != nil)
                             .font(.system(size: 10.5, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }

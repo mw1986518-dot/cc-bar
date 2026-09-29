@@ -1,6 +1,80 @@
 import SwiftUI
 import AppKit
 
+// MARK: - Screenshot privacy
+
+/// 仅用于展示，不改写原始数据。匿名编号在本次 App 运行期间跨窗口、排序和筛选保持一致。
+@MainActor
+enum PrivacyDisplay {
+    private static var aliases: [String: [String: Int]] = [:]
+
+    static var isEnabled: Bool { SettingsStore.shared.privacyMode }
+
+    private static func alias(_ key: String, category: String, english: String, chinese: String) -> String {
+        let number: Int
+        if let existing = aliases[category]?[key] {
+            number = existing
+        } else {
+            number = (aliases[category]?.count ?? 0) + 1
+            aliases[category, default: [:]][key] = number
+        }
+        let suffix = String(format: "%02d", number)
+        return tr("\(english) \(suffix)", "\(chinese) \(suffix)")
+    }
+
+    static func account(_ key: String) -> String {
+        alias(key, category: "account", english: "Account", chinese: "账号")
+    }
+
+    static func project(_ key: String) -> String {
+        alias(key, category: "project", english: "Project", chinese: "项目")
+    }
+
+    static func conversation(_ info: ConversationInfo) -> String {
+        isEnabled
+            ? alias(info.key, category: "conversation", english: "Conversation", chinese: "对话")
+            : (info.title ?? tr("Untitled", "（无标题）"))
+    }
+
+    static func help(_ text: String) -> String { isEnabled ? tr("Hidden for privacy", "隐私模式下已隐藏") : text }
+
+    /// 动态错误可能夹带账号或路径；隐私模式只保留失败状态。
+    static func error(_ text: String) -> String {
+        isEnabled ? tr("Operation failed. Turn off privacy mode to view details.", "操作失败，关闭隐私模式可查看详情。") : text
+    }
+}
+
+/// 不渲染原文再模糊，避免辅助功能、文本选择或复制仍能拿到原文。
+struct PrivacySensitiveText: View {
+    enum Kind {
+        case path, branch, identifier
+
+        var width: CGFloat {
+            switch self {
+            case .path: 112
+            case .branch: 64
+            case .identifier: 88
+            }
+        }
+    }
+
+    let text: String
+    var kind: Kind = .path
+    var sensitive = true
+
+    var body: some View {
+        if PrivacyDisplay.isEnabled && sensitive {
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(Color.secondary.opacity(0.18))
+                .frame(width: kind.width, height: 8)
+                .frame(height: 14)
+                .accessibilityLabel(tr("Hidden for privacy", "隐私模式下已隐藏"))
+        } else {
+            Text(text)
+        }
+    }
+}
+
 // MARK: - Product accent colors
 //
 // Provider 识别色定义在 Asset Catalog (*Accent)。

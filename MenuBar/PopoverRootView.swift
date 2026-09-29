@@ -215,7 +215,9 @@ struct PopoverRootView: View {
             plan = appState.commandCodeAccount?.planType ?? appState.quotaSnapshot(for: .commandCode)?.planType
             fallback = "Command Code"
         }
-        if !privacy, let email, !email.isEmpty { parts.append(email) }
+        if let email, !email.isEmpty {
+            parts.append(privacy ? PrivacyDisplay.account("primary:\(app.rawValue)") : email)
+        }
         if let plan, !plan.isEmpty { parts.append(plan) }
         if parts.isEmpty { parts.append(fallback) }
         return parts.joined(separator: " · ")
@@ -436,7 +438,7 @@ private struct ServiceBlockView: View {
                 HStack(alignment: .top, spacing: 5) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 10))
-                    Text(message)
+                    Text(PrivacyDisplay.error(message))
                         .font(.system(size: 11))
                         .lineLimit(2)
                 }

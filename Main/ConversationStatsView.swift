@@ -278,6 +278,7 @@ struct ConversationStatsView: View {
     }
 
     private func projectLabel(_ option: ConversationProjectOption, duplicateNames: Set<String>) -> String {
+        if PrivacyDisplay.isEnabled && option.status.isPathBased { return PrivacyDisplay.project(option.key) }
         switch option.status {
         case .unassigned: return tr("No project", "无明确项目")
         case .system: return tr("CCBar system tasks", "CCBar 系统任务")
@@ -289,6 +290,7 @@ struct ConversationStatsView: View {
     }
 
     private func projectHelp(_ option: ConversationProjectOption) -> String {
+        if PrivacyDisplay.isEnabled && option.status.isPathBased { return PrivacyDisplay.project(option.key) }
         switch option.status {
         case .unassigned: return tr("No reliable project could be identified", "未能可靠识别项目")
         case .system: return tr("Usage created by CCBar background tasks", "CCBar 后台任务产生的用量")
@@ -365,13 +367,14 @@ struct ConversationScanStatus: View {
 }
 
 private struct ConversationListRow: View {
+    @Environment(AppState.self) private var appState
     let summary: ConversationSummary
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 7) {
                 ServiceTile(app: summary.info.app, size: 14)
-                Text(summary.info.title ?? tr("Untitled", "（无标题）"))
+                Text(PrivacyDisplay.conversation(summary.info))
                     .font(.system(size: 12.5, weight: .medium))
                     .lineLimit(1)
                 Spacer()
@@ -409,6 +412,9 @@ private struct ConversationListRow: View {
     }
 
     private var projectLabel: String {
+        if PrivacyDisplay.isEnabled {
+            return StatsProjectLabel.name(appState.usageService.conversationAggregator.statsProjectIdentity(for: summary.info))
+        }
         switch summary.info.projectStatus {
         case .unassigned: return tr("No project", "无明确项目")
         case .system: return tr("System task", "系统任务")
@@ -417,6 +423,7 @@ private struct ConversationListRow: View {
     }
 
     private var projectHelp: String {
+        if PrivacyDisplay.isEnabled { return projectLabel }
         switch summary.info.projectStatus {
         case .unassigned: return tr("No reliable project could be identified", "未能可靠识别项目")
         case .system: return tr("Usage created by CCBar background tasks", "CCBar 后台任务产生的用量")
@@ -473,17 +480,17 @@ private struct ConversationDetailView: View {
                 UsageSpeedBadge(summary: detail.speed.summary)
                 Spacer()
             }
-            Text(detail.info.title ?? tr("Untitled", "（无标题）"))
+            Text(PrivacyDisplay.conversation(detail.info))
                 .font(.system(size: 18, weight: .semibold))
                 .lineLimit(2)
                 .textSelection(.enabled)
-            Text(projectText)
+            PrivacySensitiveText(text: projectText, sensitive: detail.info.projectStatus.isPathBased)
                 .font(.system(size: 11, design: detail.info.projectStatus.isPathBased ? .monospaced : .default))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
-                .help(projectText)
+                .help(PrivacyDisplay.help(projectText))
             // 一行放不下时对话 ID 换到第二行。
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 12) {
@@ -506,7 +513,7 @@ private struct ConversationDetailView: View {
         if let branch = detail.info.gitBranch, !branch.isEmpty {
             HStack(spacing: 4) {
                 Image(systemName: "arrow.triangle.branch")
-                Text(branch)
+                PrivacySensitiveText(text: branch, kind: .branch)
                     .font(.system(size: 11, design: .monospaced))
                     .lineLimit(1)
             }
@@ -525,19 +532,22 @@ private struct ConversationDetailView: View {
     private var conversationIDItem: some View {
         HStack(spacing: 4) {
             Text(tr("Conversation ID", "对话 ID"))
-            Text(detail.info.conversationID)
+            PrivacySensitiveText(text: detail.info.conversationID, kind: .identifier)
                 .font(.system(size: 11, design: .monospaced))
                 .lineLimit(1)
                 .textSelection(.enabled)
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(detail.info.conversationID, forType: .string)
-            } label: {
-                Image(systemName: "doc.on.doc")
-                    .font(.system(size: 10))
+            if !PrivacyDisplay.isEnabled {
+                Button {
+                    guard !PrivacyDisplay.isEnabled else { return }
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(detail.info.conversationID, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.borderless)
+                .help(tr("Copy conversation ID", "复制对话 ID"))
             }
-            .buttonStyle(.borderless)
-            .help(tr("Copy conversation ID", "复制对话 ID"))
         }
     }
 

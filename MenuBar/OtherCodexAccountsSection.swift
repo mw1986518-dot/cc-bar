@@ -68,8 +68,7 @@ private struct ImportedCodexRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
-            // 左：别名 + 副标题（隐私模式下名称为空,VStack 只剩 subtitle,
-            // 由外层 HStack(.center) 自动垂直居中）
+            // 左：名称 + 副标题；隐私模式使用跨页面一致的匿名账号编号。
             VStack(alignment: .leading, spacing: 1) {
                 if !displayName.isEmpty {
                     Text(displayName)
@@ -162,7 +161,7 @@ private struct ImportedCodexRow: View {
                 HStack(spacing: 4) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 9))
-                    Text(shortError(err))
+                    Text(PrivacyDisplay.error(shortError(err)))
                         .font(.system(size: 10.5))
                         .lineLimit(1)
                 }
@@ -178,7 +177,7 @@ private struct ImportedCodexRow: View {
     // MARK: Derived
 
     private var displayName: String {
-        if SettingsStore.shared.privacyMode { return "" }
+        if PrivacyDisplay.isEnabled { return PrivacyDisplay.account(account.id) }
         return account.alias.isEmpty ? (account.email.map { emailUsername($0) } ?? account.id) : account.alias
     }
 

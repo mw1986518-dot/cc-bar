@@ -219,7 +219,7 @@ final class SettingsStore {
     var appLanguage: AppLanguage { didSet { defaults.set(appLanguage.rawValue, forKey: Keys.appLanguage) } }
     var launchAtLogin: Bool { didSet { defaults.set(launchAtLogin, forKey: Keys.launchAtLogin) } }
 
-    /// 隐私模式：Popover 中主账号邮箱、Codex 副账号名称均隐藏
+    /// 截图隐私模式：全局隐藏账号、项目及对话身份；保留真实用量统计。
     var privacyMode: Bool { didSet { defaults.set(privacyMode, forKey: Keys.privacyMode) } }
 
     /// 启动时自动检查 GitHub 是否有新版本(默认关;手动检查始终可用)

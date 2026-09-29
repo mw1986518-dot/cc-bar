@@ -162,6 +162,7 @@ private struct DetectAccountsStep: View {
             // 5 行账号要在 520 高的窗口里放下：行间距 8、行内边距 10 / 14、tile 28、邮箱与凭据来源合一行。
             VStack(spacing: 8) {
                 DetectedAccountRow(
+                    app: .codex,
                     title: "Codex",
                     subtitle: "OpenAI",
                     plan: appState.codexAccount?.planType,
@@ -173,6 +174,7 @@ private struct DetectAccountsStep: View {
                     isDetected: appState.codexAccount != nil
                 )
                 DetectedAccountRow(
+                    app: .claude,
                     title: "Claude Code",
                     subtitle: "Anthropic",
                     plan: appState.claudeAccount?.subscriptionType,
@@ -184,6 +186,7 @@ private struct DetectAccountsStep: View {
                     isDetected: appState.claudeAccount != nil
                 )
                 DetectedAccountRow(
+                    app: .antigravity,
                     title: "Antigravity",
                     subtitle: "Google",
                     plan: appState.antigravityQuota?.planType ?? appState.antigravityAccount?.planType,
@@ -195,6 +198,7 @@ private struct DetectAccountsStep: View {
                     isDetected: appState.antigravityAccount != nil
                 )
                 DetectedAccountRow(
+                    app: .cursor,
                     title: "Cursor",
                     subtitle: "Cursor",
                     plan: appState.cursorQuota?.planType,
@@ -206,6 +210,7 @@ private struct DetectAccountsStep: View {
                     isDetected: appState.cursorAccount != nil
                 )
                 DetectedAccountRow(
+                    app: .commandCode,
                     title: "Command Code",
                     subtitle: "Command Code",
                     plan: appState.commandCodeQuota?.planType ?? appState.commandCodeAccount?.planType,
@@ -268,6 +273,7 @@ private struct DetectAccountsStep: View {
 }
 
 private struct DetectedAccountRow: View {
+    let app: QuotaApp
     let title: String
     let subtitle: String
     let plan: String?
@@ -293,12 +299,12 @@ private struct DetectedAccountRow: View {
                 }
                 // 邮箱优先完整显示；凭据来源（Cursor 的路径很长）只占一行，放不下从中间截断。
                 HStack(alignment: .firstTextBaseline, spacing: 0) {
-                    Text(email ?? tr("Not detected", "未检测到"))
+                    Text(email.map { PrivacyDisplay.isEnabled ? PrivacyDisplay.account("primary:\(app.rawValue)") : $0 } ?? tr("Not detected", "未检测到"))
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .layoutPriority(1)
-                    Text(" · \(source)")
+                    PrivacySensitiveText(text: " · \(source)")
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)

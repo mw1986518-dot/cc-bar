@@ -354,11 +354,12 @@ private struct CycleProjectBar: View {
                 Capsule().fill(Color.secondary.opacity(0.18))
                 HStack(spacing: 1) {
                     ForEach(segments) { segment in
+                        let name = PrivacyDisplay.isEnabled && segment.id != "rest" ? PrivacyDisplay.project(segment.id) : segment.name
                         CompositionFill(role: segment.role)
                             .frame(width: max(1, proxy.size.width * segment.percent / 100))
                             .help(tr(
-                                "\(segment.name) · ≈\(String(format: "%.1f", segment.percent))% · \(StatsFormatter.compactToken(segment.tokens)) tokens this cycle",
-                                "\(segment.name) · 约 \(String(format: "%.1f", segment.percent))% · 本周期 \(StatsFormatter.compactToken(segment.tokens)) Tokens"
+                                "\(name) · ≈\(String(format: "%.1f", segment.percent))% · \(StatsFormatter.compactToken(segment.tokens)) tokens this cycle",
+                                "\(name) · 约 \(String(format: "%.1f", segment.percent))% · 本周期 \(StatsFormatter.compactToken(segment.tokens)) Tokens"
                             ))
                     }
                 }

@@ -940,13 +940,13 @@ struct StatsView: View {
                 addedPrimaryCodex = true
             }
 
-            for (idx, account) in appState.importedCodexAccounts.enumerated() {
+            for account in appState.importedCodexAccounts {
                 // 展示层去重:主账号段已展示时,跳过与它同身份的镜像导入项(历史 key 不变,仍在盘上)。
                 if addedPrimaryCodex && appState.importedCodexAccountMirrorsPrimary(account) { continue }
                 let key = QuotaHistoryAccountKey.codexImported(id: account.id)
                 sections.append(timelineSection(
                     accountKey: key,
-                    title: importedCodexTimelineTitle(account, index: idx),
+                    title: importedCodexTimelineTitle(account),
                     app: .codex,
                     snapshot: appState.importedCodexQuota(for: account),
                     isLoading: appState.importedCodexRefreshState(for: account).inFlight
@@ -1044,9 +1044,9 @@ struct StatsView: View {
             .sorted { $0.sampledAt < $1.sampledAt }
     }
 
-    private func importedCodexTimelineTitle(_ account: ImportedCodexAccount, index: Int) -> String {
+    private func importedCodexTimelineTitle(_ account: ImportedCodexAccount) -> String {
         if SettingsStore.shared.privacyMode {
-            return tr("Codex · Account \(index + 1)", "Codex · 账号 \(index + 1)")
+            return "Codex · \(PrivacyDisplay.account(account.id))"
         }
         if !account.alias.isEmpty { return "Codex · \(account.alias)" }
         if let email = account.email, !email.isEmpty {
@@ -1287,7 +1287,7 @@ private struct StatsUsageErrorBanner: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.orange.opacity(0.08))
             .overlay(alignment: .bottom) { Divider() }
-            .help(error ?? "")
+            .help(PrivacyDisplay.help(error ?? ""))
         }
     }
 }
@@ -1825,7 +1825,7 @@ private struct OverviewCompositionPanel: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if !subtitle(for: row).isEmpty {
-                    Text(subtitle(for: row))
+                    PrivacySensitiveText(text: subtitle(for: row), sensitive: row.projectStatus?.isPathBased == true)
                         .font(.system(size: 10.5))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
@@ -1911,7 +1911,11 @@ private struct OverviewCompositionPanel: View {
             switch row.projectStatus {
             case .unassigned: return tr("No project", "无明确项目")
             case .system: return tr("CCBar system tasks", "CCBar 系统任务")
-            default: return row.title
+            default:
+                if PrivacyDisplay.isEnabled, case .openProject(let key) = row.action {
+                    return PrivacyDisplay.project(key)
+                }
+                return row.title
             }
         case .unattributed:
             return tr("Unattributed", "未归属")
@@ -2031,7 +2035,7 @@ struct TopConversationRowView: View {
                     .frame(width: 14, alignment: .trailing)
                 ServiceTile(app: row.summary.info.app, size: 14)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(row.summary.info.title ?? tr("Untitled", "（无标题）"))
+                    Text(PrivacyDisplay.conversation(row.summary.info))
                         .font(.system(size: 12.5, weight: .medium))
                         .lineLimit(1)
                     Text(metaLine)
@@ -2085,7 +2089,7 @@ struct TopConversationRowView: View {
         if showsProject {
             parts.append(StatsProjectLabel.name(row.project))
         }
-        if let branch = row.summary.info.gitBranch, !branch.isEmpty { parts.append(branch) }
+        if !PrivacyDisplay.isEnabled, let branch = row.summary.info.gitBranch, !branch.isEmpty { parts.append(branch) }
         parts.append(StatsFormatter.day(row.summary.rangeLastAt))
         return parts.joined(separator: " · ")
     }
@@ -2098,7 +2102,8 @@ enum StatsProjectLabel {
         switch project.status {
         case .unassigned: return tr("No project", "无明确项目")
         case .system: return tr("CCBar system tasks", "CCBar 系统任务")
-        case .available, .unavailable, .unverified: return project.name
+        case .available, .unavailable, .unverified:
+            return PrivacyDisplay.isEnabled ? PrivacyDisplay.project(project.key) : project.name
         }
     }
 }
@@ -2415,9 +2420,15 @@ struct StatsSearchField: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
-            TextField(prompt, text: $text)
-                .textFieldStyle(.plain)
-                .font(.system(size: 11.5))
+            Group {
+                if PrivacyDisplay.isEnabled {
+                    SecureField(prompt, text: $text)
+                } else {
+                    TextField(prompt, text: $text)
+                }
+            }
+            .textFieldStyle(.plain)
+            .font(.system(size: 11.5))
         }
         .padding(.horizontal, 8)
         .frame(height: 24)

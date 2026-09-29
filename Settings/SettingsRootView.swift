@@ -79,6 +79,7 @@ struct SettingsRootView: View {
         .sheet(isPresented: $showCodexResetCreditsSheet) {
             CodexResetCreditsSheet(
                 accountTitle: appState.codexAccount?.email ?? "Codex",
+                privacyAccountKey: "primary:codex",
                 fetchCredits: { await appState.fetchCodexResetCredits() }
             )
         }
@@ -201,7 +202,7 @@ struct SettingsRootView: View {
                 let usageApp = provider.app.usageApp
                 ServiceSettingsRow(
                     provider: provider,
-                    email: info.email,
+                    email: info.email.map { PrivacyDisplay.isEnabled ? PrivacyDisplay.account("primary:\(provider.app.rawValue)") : $0 },
                     plan: info.plan,
                     availability: info.availability,
                     accessory: accessoryView(for: provider.app),
@@ -366,8 +367,8 @@ struct SettingsRootView: View {
             PrefsRow(
                 label: "Privacy mode",
                 chinese: "隐私模式",
-                desc: "Hide provider emails in the popover and names for other Codex accounts.",
-                chineseDesc: "弹出窗口中隐藏 Provider 邮箱，并隐藏 Codex 副账号名称"
+                desc: "Hide sensitive account, project, and conversation information while keeping usage stats visible, so you can share screenshots.",
+                chineseDesc: "开启隐私模式，隐藏账号、项目及对话等敏感信息，保留用量统计，方便您截图分享。"
             ) {
                 Toggle("", isOn: Binding(get: { settings.privacyMode }, set: { settings.privacyMode = $0 }))
                     .labelsHidden()
@@ -1054,7 +1055,7 @@ struct SettingsRootView: View {
             .font(.system(size: 11))
             .foregroundStyle(.orange)
             .padding(.top, 2)
-            .help(appState.usageService.lastRebuildDiagnostic ?? "")
+            .help(PrivacyDisplay.help(appState.usageService.lastRebuildDiagnostic ?? ""))
         )
     }
 
@@ -1062,7 +1063,7 @@ struct SettingsRootView: View {
     private var launchAtLoginDetail: AnyView? {
         guard let launchAtLoginMessage else { return nil }
         return AnyView(
-            Text(launchAtLoginMessage)
+            Text(launchAtLoginMessageIsError ? PrivacyDisplay.error(launchAtLoginMessage) : launchAtLoginMessage)
                 .font(.system(size: 11))
                 .foregroundStyle(launchAtLoginMessageIsError ? Color.red : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)

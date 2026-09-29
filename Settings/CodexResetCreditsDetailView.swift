@@ -18,6 +18,7 @@ struct CodexResetCreditsSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let accountTitle: String
+    let privacyAccountKey: String
     let fetchCredits: () async -> Result<CodexResetCreditsClient.Fetched, QuotaError>
 
     @State private var state: CodexResetCreditsState = .loading
@@ -74,7 +75,7 @@ struct CodexResetCreditsSheet: View {
                 Text(tr("Reset Credits", "使用限额重置"))
                     .font(.system(size: 14, weight: .semibold))
                 if !accountTitle.isEmpty {
-                    Text(accountTitle)
+                    Text(PrivacyDisplay.isEnabled ? PrivacyDisplay.account(privacyAccountKey) : accountTitle)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -112,7 +113,7 @@ struct CodexResetCreditsSheet: View {
                 Image(systemName: "exclamationmark.triangle")
                     .font(.system(size: 22))
                     .foregroundStyle(.orange)
-                Text(message)
+                Text(PrivacyDisplay.error(message))
                     .font(.system(size: 11.5))
                     .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
