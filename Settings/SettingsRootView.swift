@@ -186,18 +186,20 @@ struct SettingsRootView: View {
 
     @ViewBuilder
     private func servicesSection(settings: SettingsStore) -> some View {
-        // 已接入服务聚合卡片
+        // 已接入服务矩阵：每个服务一行，列为状态 / 启用 / 菜单栏 / 悬浮窗 / 用量统计 / 专属操作
         PrefsGroup(
             title: "Connected Services",
             chinese: "已接入服务",
             desc: "Configure quota monitoring, menu bar, floating HUD, and usage stats per service.",
             chineseDesc: "按服务配置配额监控、菜单栏、悬浮窗与本地统计"
         ) {
+            ServiceMatrixHeader()
+
             let providers = QuotaProviderDescriptor.allProviders
             ForEach(providers, id: \.id) { provider in
                 let info = accountInfo(for: provider.app)
                 let usageApp = provider.app.usageApp
-                ServiceSettingsCard(
+                ServiceSettingsRow(
                     provider: provider,
                     email: info.email,
                     plan: info.plan,
@@ -216,7 +218,7 @@ struct SettingsRootView: View {
 
             // 本地用量服务：Pi
             let piInfo = usageServiceInfo(for: .pi)
-            ServiceSettingsCard(
+            ServiceSettingsRow(
                 logoName: "pi",
                 fallback: "P",
                 tint: UsageApp.pi.tintColor,
@@ -226,15 +228,14 @@ struct SettingsRootView: View {
                 availability: piInfo.availability,
                 isEnabled: usageStatsBinding(for: .pi, settings: settings),
                 supportsMenuBar: false,
-                supportsFloatingHUD: false,
-                isUsageVisible: usageStatsBinding(for: .pi, settings: settings)
+                supportsFloatingHUD: false
             )
 
             InsetDivider()
 
             // 本地用量服务：OpenCode
             let opencodeInfo = usageServiceInfo(for: .opencode)
-            ServiceSettingsCard(
+            ServiceSettingsRow(
                 logoName: "opencode",
                 fallback: "O",
                 tint: UsageApp.opencode.tintColor,
@@ -244,15 +245,14 @@ struct SettingsRootView: View {
                 availability: opencodeInfo.availability,
                 isEnabled: usageStatsBinding(for: .opencode, settings: settings),
                 supportsMenuBar: false,
-                supportsFloatingHUD: false,
-                isUsageVisible: usageStatsBinding(for: .opencode, settings: settings)
+                supportsFloatingHUD: false
             )
 
             InsetDivider()
 
             // 本地用量服务：DSH（只进主窗口普通统计与对话，不进菜单栏 / 悬浮窗 / Cycles）
             let dshInfo = usageServiceInfo(for: .dsh)
-            ServiceSettingsCard(
+            ServiceSettingsRow(
                 logoName: "dsh",
                 fallback: "D",
                 tint: UsageApp.dsh.tintColor,
@@ -262,8 +262,7 @@ struct SettingsRootView: View {
                 availability: dshInfo.availability,
                 isEnabled: usageStatsBinding(for: .dsh, settings: settings),
                 supportsMenuBar: false,
-                supportsFloatingHUD: false,
-                isUsageVisible: usageStatsBinding(for: .dsh, settings: settings)
+                supportsFloatingHUD: false
             )
         }
 
@@ -1186,9 +1185,52 @@ private struct InsetDivider: View {
     }
 }
 
-// MARK: - ServiceSettingsCard
+// MARK: - Service matrix
 
-private struct ServiceSettingsCard: View {
+/// 「已接入服务」矩阵列宽。服务列占剩余宽度；主窗口最小宽 1040 时服务列仍有约 330pt。
+private enum ServiceMatrixColumn {
+    static let status: CGFloat = 96
+    static let toggle: CGFloat = 64
+    static let destination: CGFloat = 64
+    static let usage: CGFloat = 72
+    static let accessory: CGFloat = 40
+}
+
+private struct ServiceMatrixHeader: View {
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(tr("Service", "服务"))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(tr("Status", "状态"))
+                .frame(width: ServiceMatrixColumn.status, alignment: .leading)
+            centered(tr("Enabled", "启用"), width: ServiceMatrixColumn.toggle)
+            centered(tr("Menu Bar", "菜单栏"), width: ServiceMatrixColumn.destination)
+            centered(tr("Floating HUD", "悬浮窗"), width: ServiceMatrixColumn.destination)
+            centered(tr("Usage Stats", "用量统计"), width: ServiceMatrixColumn.usage)
+            Color.clear
+                .frame(width: ServiceMatrixColumn.accessory, height: 1)
+        }
+        .font(.system(size: 10.5, weight: .semibold))
+        .foregroundStyle(.tertiary)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.06))
+                .frame(height: 0.5)
+        }
+    }
+
+    /// 英文列头（如 Floating HUD）可能略宽于列，按自然宽度居中，允许轻微越出列边界。
+    private func centered(_ text: String, width: CGFloat) -> some View {
+        Text(text)
+            .lineLimit(1)
+            .fixedSize()
+            .frame(width: width)
+    }
+}
+
+private struct ServiceSettingsRow: View {
     let logoName: String
     let fallback: String
     let tint: Color
@@ -1282,87 +1324,101 @@ private struct ServiceSettingsCard: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Header: Logo + 账号与服务信息 + 状态 + 弹窗操作 + 总开关
-            HStack(spacing: 12) {
-                ServiceTile(
-                    logoName: logoName,
-                    fallback: fallback,
-                    tint: tint,
-                    size: 30,
-                    logoSize: 17,
-                    cornerRadius: 7
-                )
+        HStack(spacing: 0) {
+            HStack(spacing: 10) {
+                ServiceTile(logoName: logoName, fallback: fallback, tint: tint)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 5) {
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
                         Text(title)
                             .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1)
                         Text("· \(vendor)")
                             .font(.system(size: 11.5))
                             .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                     Text(detailText)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                HStack(spacing: 10) {
-                    statusBadge
-
-                    if let accessory { accessory }
-
-                    Toggle("", isOn: $isEnabled)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(.green)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(detailText)
                 }
             }
-            .padding(.top, 14)
-            .padding(.bottom, isEnabled ? 8 : 14)
-            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.trailing, 8)
 
-            // 子选项：仅当总开关开启时显示展示位置 Checkbox 行（无硬分割线，自然呼吸间距）
-            if isEnabled {
-                HStack(spacing: 12) {
-                    Text(tr("Display destinations", "展示位置"))
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
+            statusBadge
+                .frame(width: ServiceMatrixColumn.status, alignment: .leading)
 
-                    Spacer()
+            // 小号开关：表格行更紧凑，接近设计稿 32×20，也不会撑满 64pt 列宽。
+            Toggle("", isOn: $isEnabled)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .tint(.green)
+                .frame(width: ServiceMatrixColumn.toggle)
 
-                    HStack(spacing: 16) {
+            // 展示位置三列：总开关关闭时整组置灰且不可点，不再隐藏，保持表格对齐。
+            HStack(spacing: 0) {
+                DisplayDestinationCheckbox(
+                    title: "\(title) \(tr("Menu Bar", "菜单栏"))",
+                    isOn: $showInMenuBar,
+                    disabled: !isEnabled || !supportsMenuBar,
+                    disabledHelp: supportsMenuBar ? nil : localUsageOnlyHelp
+                )
+                .frame(width: ServiceMatrixColumn.destination)
+
+                DisplayDestinationCheckbox(
+                    title: "\(title) \(tr("Floating HUD", "悬浮窗"))",
+                    isOn: $showInFloatingHUD,
+                    disabled: !isEnabled || !supportsFloatingHUD || !floatingHUDGloballyEnabled,
+                    disabledHelp: floatingDisabledHelp
+                )
+                .frame(width: ServiceMatrixColumn.destination)
+
+                Group {
+                    if let isUsageVisible {
                         DisplayDestinationCheckbox(
-                            title: tr("Menu Bar", "菜单栏"),
-                            isOn: $showInMenuBar,
-                            disabled: !supportsMenuBar,
-                            disabledHelp: supportsMenuBar ? nil : tr("Local usage only, no subscription quota", "仅支持本地用量，无订阅配额")
+                            title: "\(title) \(tr("Usage Stats", "用量统计"))",
+                            isOn: isUsageVisible,
+                            disabled: !isEnabled
                         )
-
-                        DisplayDestinationCheckbox(
-                            title: tr("Floating HUD", "悬浮窗"),
-                            isOn: $showInFloatingHUD,
-                            disabled: !supportsFloatingHUD || !floatingHUDGloballyEnabled,
-                            disabledHelp: !supportsFloatingHUD
-                                ? tr("Local usage only, no subscription quota", "仅支持本地用量，无订阅配额")
-                                : (floatingHUDGloballyEnabled ? nil : tr("Enable Floating HUD in Appearance & Display first", "需先在「外观与显示」中开启桌面悬浮窗"))
-                        )
-
-                        if let isUsageVisible {
-                            DisplayDestinationCheckbox(
-                                title: tr("Usage Stats", "用量统计"),
-                                isOn: isUsageVisible
-                            )
-                        }
+                    } else {
+                        // 不适用：无用量数据的服务，或本地用量服务（启用即用量统计）。
+                        Text("—")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.tertiary)
+                            .accessibilityLabel(tr("Not applicable", "不适用"))
                     }
                 }
-                .padding(.top, 0)
-                .padding(.bottom, 12)
-                .padding(.horizontal, 16)
+                .frame(width: ServiceMatrixColumn.usage)
             }
+            .opacity(isEnabled ? 1 : 0.4)
+
+            // 用固定宽的占位撑住操作列：没有专属操作的行也要占 40pt，否则整行各列右移、与列头错位。
+            ZStack {
+                Color.clear
+                    .frame(width: ServiceMatrixColumn.accessory, height: 1)
+                if let accessory { accessory }
+            }
+            .frame(width: ServiceMatrixColumn.accessory)
         }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+    }
+
+    private var localUsageOnlyHelp: String {
+        tr("Local usage only, no subscription quota", "仅支持本地用量，无订阅配额")
+    }
+
+    /// 悬浮窗列不可勾选的原因：不支持优先；总开关关闭时不提示；其余是全局悬浮窗未开启。
+    private var floatingDisabledHelp: String? {
+        if !supportsFloatingHUD { return localUsageOnlyHelp }
+        if !isEnabled || floatingHUDGloballyEnabled { return nil }
+        return tr("Enable Floating HUD in Appearance & Display first", "需先在「外观与显示」中开启桌面悬浮窗")
     }
 
     @ViewBuilder
@@ -1387,6 +1443,8 @@ private struct ServiceSettingsCard: View {
 
 // MARK: - DisplayDestinationCheckbox
 
+/// 矩阵单元格里的 13pt 复选框，没有文字标签（列头说明含义），`title` 只作无障碍标签。
+/// 整个单元格可点，不只是 13pt 的框。
 private struct DisplayDestinationCheckbox: View {
     let title: String
     @Binding var isOn: Bool
@@ -1406,43 +1464,26 @@ private struct DisplayDestinationCheckbox: View {
                 isOn.toggle()
             }
         } label: {
-            HStack(spacing: 5.5) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-                        .fill(
-                            isOn
-                                ? (disabled ? Color.primary.opacity(0.03) : Color.primary.opacity(0.045))
-                                : Color.clear
-                        )
-                        .frame(width: 13, height: 13)
+            ZStack {
+                RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                    .fill(isOn ? Color.primary.opacity(disabled ? 0.04 : 0.08) : Color.clear)
 
-                    RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-                        .strokeBorder(
-                            isOn
-                                ? (disabled ? Color.primary.opacity(0.08) : Color.primary.opacity(0.16))
-                                : Color.primary.opacity(disabled ? 0.06 : 0.12),
-                            lineWidth: 0.8
-                        )
-                        .frame(width: 13, height: 13)
+                RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                    .strokeBorder(borderColor, lineWidth: 0.8)
 
-                    if isOn {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 8, weight: .medium))
-                            .foregroundStyle(disabled ? Color.secondary.opacity(0.3) : Color.secondary)
-                    }
+                if isOn {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(disabled ? Color.secondary.opacity(0.4) : Color.secondary)
                 }
-
-                Text(title)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(
-                        disabled
-                            ? Color.secondary.opacity(0.35)
-                            : (isOn ? Color.secondary : Color.secondary.opacity(0.65))
-                    )
             }
+            .frame(width: 13, height: 13)
+            .frame(maxWidth: .infinity, minHeight: 22)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(isOn ? tr("On", "已开启") : tr("Off", "已关闭"))
         .onHover { hovering in
             guard disabled, let disabledHelp, !disabledHelp.isEmpty else { return }
             hoverTask?.cancel()
@@ -1477,6 +1518,11 @@ private struct DisplayDestinationCheckbox: View {
         } else {
             button.pointingHandCursor()
         }
+    }
+
+    private var borderColor: Color {
+        if disabled { return Color.primary.opacity(isOn ? 0.12 : 0.06) }
+        return Color.primary.opacity(isOn ? 0.28 : 0.12)
     }
 }
 
