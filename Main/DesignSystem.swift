@@ -474,8 +474,9 @@ enum CCSpacing {
 // MARK: - VisualEffectBackground
 //
 // SwiftUI 包 NSVisualEffectView,用于把指定 material(.hudWindow / .popover / .sidebar 等)
-// 接到 SwiftUI 视图层级里。HUD 必须用 .hudWindow material(prototype 给的 alpha + blur)。
-// 不要用 .background(.regularMaterial),它对应的是 .popover material。
+// 接到 SwiftUI 视图层级里。悬浮窗 HUD 用它叠「实色压底 + .popover material + hairline」
+// 三层(见 FloatingContentView 与 docs/设计风格.md §12.3),不用 .hudWindow,
+// 因为 .hudWindow 在彩色桌面下前景对比不足。
 
 struct VisualEffectBackground: NSViewRepresentable {
     var material: NSVisualEffectView.Material
