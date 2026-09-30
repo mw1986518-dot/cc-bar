@@ -3427,6 +3427,40 @@ final class QuotaParsingTests: XCTestCase {
         XCTAssertEqual(Pricing.billingEquivalentMultiplier(app: .claude, model: "claude-opus-5-5", speed: .fast), 2)
     }
 
+    /// GPT-6.1 Sol：与 GPT-6 Sol 同价，但缓存输入减半为 $0.10；长上下文与 Fast 沿用同一套规则。
+    func testGPT61SolRates() throws {
+        let date = ISO8601DateFormatter().date(from: "2026-09-30T00:00:00Z")!
+
+        let short = try XCTUnwrap(Pricing.costBreakdown(
+            app: .codex, model: "gpt-6.1-sol", speed: .standard,
+            input: 1_000_000, output: 1_000_000, cacheRead: 1_000_000, cacheCreation: 1_000_000,
+            at: date, inputTotal: 272_000
+        ))
+        XCTAssertEqual(short, CostBreakdown(input: 2, output: 10, cacheRead: 0.1, cacheCreation: 2.5))
+
+        let long = try XCTUnwrap(Pricing.costBreakdown(
+            app: .codex, model: "gpt-6.1-sol", speed: .standard,
+            input: 1_000_000, output: 1_000_000, cacheRead: 1_000_000, cacheCreation: 1_000_000,
+            at: date, inputTotal: 272_001
+        ))
+        XCTAssertEqual(long, CostBreakdown(input: 4, output: 15, cacheRead: 0.2, cacheCreation: 5))
+
+        let fast = try XCTUnwrap(Pricing.costBreakdown(
+            app: .codex, model: "gpt-6.1-sol", speed: .fast,
+            input: 1_000_000, output: 1_000_000, cacheRead: 1_000_000, cacheCreation: 1_000_000,
+            at: date, inputTotal: 100_000
+        ))
+        XCTAssertEqual(fast, CostBreakdown(input: 4, output: 20, cacheRead: 0.2, cacheCreation: 5))
+        XCTAssertEqual(Pricing.billingEquivalentMultiplier(app: .codex, model: "gpt-6.1-sol", speed: .fast), 2.5)
+
+        // OpenAI Priority 明确排除长上下文：Fast 超阈值不估价，也不拿 Standard 长上下文价顶替。
+        XCTAssertNil(Pricing.costBreakdown(
+            app: .codex, model: "gpt-6.1-sol", speed: .fast,
+            input: 272_001, output: 1, cacheRead: 0, cacheCreation: 0,
+            at: date, inputTotal: 272_001
+        ))
+    }
+
     func testClaudeCacheCreationTTLUsesSeparateStandardAndFastRates() throws {
         let standard5m = try XCTUnwrap(Pricing.costBreakdown(
             app: .claude,

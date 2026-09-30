@@ -45,7 +45,7 @@ nonisolated private struct TieredPricedPeriod: Sendable {
 }
 
 nonisolated enum Pricing {
-    /// 价格表按各厂商官方定价页核对（最近一次 2026-09-29），起点对齐 cc-switch `seed_model_pricing` /
+    /// 价格表按各厂商官方定价页核对（最近一次 2026-09-30），起点对齐 cc-switch `seed_model_pricing` /
     /// CodexBar `CostUsagePricing`。命中不到时返回 nil。键为 `pricingKey(model:)` 归一化后的模型名（循环剥 provider 前缀
     /// `openai-codex/` / `openai/` / `anthropic/` / `deepseek/` / `opencode-go/` / `commandcode/` /
     /// `command-code/` / `antigravity/` / `z-ai/` / `zai/` / `minimax/` 和末尾 `-YYYYMMDD` /
@@ -92,6 +92,9 @@ nonisolated enum Pricing {
         "claude-3-opus":     .init(input: 15,  output: 75,  cacheRead: 1.50, cacheCreation: 18.75),
 
         // —— Codex / GPT-6、GPT-5 系（input 含 cache_read，调用侧已扣 billable）。
+        // GPT-6.1 Sol（2026-09-29 DevDay 发布）：输入 / 输出与 GPT-6 Sol 同价，缓存输入减半为 $0.10（0.05x）；
+        // 272K 长上下文阶梯见 contextPriceTiers，Fast 档见 codexFastPrices。
+        "gpt-6.1-sol":       .init(input: 2,    output: 10,  cacheRead: 0.10, cacheCreation: 2.5),
         "gpt-6-astra":       .init(input: 10,   output: 50,  cacheRead: 1,    cacheCreation: 12.5),
         "gpt-6-sol":         .init(input: 2,    output: 10,  cacheRead: 0.20, cacheCreation: 2.5),
         "gpt-6-luna":        .init(input: 0.10, output: 0.50, cacheRead: 0.01, cacheCreation: 0.125),
@@ -177,6 +180,7 @@ nonisolated enum Pricing {
     /// Fast / Priority 的离线兜底表。当前在线目录可提供部分 Fast 价格；
     /// 历史/特殊规则优先本地，其余型号在线优先、命中不到再回落这里。
     private static let codexFastPrices: [String: ModelPrice] = [
+        "gpt-6.1-sol":   .init(input: 4,    output: 20,  cacheRead: 0.2,  cacheCreation: 5),
         "gpt-6-astra":   .init(input: 20,   output: 100, cacheRead: 2,    cacheCreation: 25),
         "gpt-6-sol":     .init(input: 4,    output: 20,  cacheRead: 0.4,  cacheCreation: 5),
         "gpt-6-luna":    .init(input: 0.2,  output: 1,   cacheRead: 0.02, cacheCreation: 0.25),
@@ -212,6 +216,7 @@ nonisolated enum Pricing {
 
     /// Fast 的计费等效 Token 倍率。Codex 使用 ChatGPT credit 倍率；Claude 使用 Fast/Standard API 价比。
     private static let codexFastMultipliers: [String: Decimal] = [
+        "gpt-6.1-sol": 2.5,
         "gpt-6-astra": 2.5,
         "gpt-6-sol": 2.5,
         "gpt-6-luna": 2.5,
@@ -246,6 +251,11 @@ nonisolated enum Pricing {
     /// `gpt-5.6` 是 Sol 的别名；Pro 是 reasoning.mode，不是独立 model slug。
     /// GPT-5.6 Sol 这里是 2026-08-21 促销前的原价，促销价见 `timedContextPriceTiers`。
     private static let contextPriceTiers: [String: ContextPriceTiers] = [
+        "gpt-6.1-sol": .init(
+            longContextThreshold: 272_000,
+            shortContext: .init(input: 2, output: 10, cacheRead: 0.10, cacheCreation: 2.5),
+            longContext: .init(input: 4, output: 15, cacheRead: 0.20, cacheCreation: 5)
+        ),
         "gpt-6-astra": .init(
             longContextThreshold: 272_000,
             shortContext: .init(input: 10, output: 50, cacheRead: 1, cacheCreation: 12.5),
