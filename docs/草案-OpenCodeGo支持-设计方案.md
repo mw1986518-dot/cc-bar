@@ -339,7 +339,7 @@ Codex → Claude Code → Cursor → OpenCode Go
 ## 6. 产品口径
 
 - **产品归属**：OpenCode Go 在本需求中是 `QuotaApp` 订阅额度 Provider，不是新的 `UsageApp` Agent 工具。Settings → Accounts 总开关只控制远端额度刷新与 Popover 卡片，不控制主窗口中的任何 Agent 对话。
-- **账户范围**：Go 订阅额度来自远端账号，覆盖该账号所有设备，与本机 `OpencodeScanner` 读取的 Agent 对话 SQLite 完全独立。现有 `opencodeTodayCost` 聚合本地 OpenCode Agent 用量，无法代表 Go 订阅窗口，因此 Go 卡片不展示今日 / 本周费用，也不改现有本地统计。
+- **账户范围**：Go 订阅额度来自远端账号，覆盖该账号所有设备，与本机 `OpencodeScanner` 读取的 Agent 对话 SQLite 完全独立。本地 OpenCode 今日费用（`UsageAggregator.todayCost(for: .opencode)`）聚合的是本机 Agent 用量，无法代表 Go 订阅窗口，因此 Go 卡片不展示今日 / 本周费用，也不改现有本地统计。
 - **Token / 请求数**：Go usage 端点不返回 Token / 请求数，第一版不根据订阅额度构造“按模型用量统计”。本地对话已有 Token 与预估费用继续照常展示，包括模型 Provider 为 `opencode-go` 的对话。
 - **额度窗口语义**：rolling 为 5 小时滚动窗口、weekly 为 7 天窗口、monthly 为订阅月；三个窗口彼此独立，不做依赖推导。
 - **percent 口径**：`100 - percent` = 剩余比例；UI 永远只展示剩余。
@@ -408,7 +408,7 @@ Codex → Claude Code → Cursor → OpenCode Go
 - key 不进入 cc-bar Keychain / UserDefaults / quota cache / 日志；额度快照和不可逆完整账号摘要可进入现有 `quota-cache.json`；key 只发送到 `https://opencode.ai/zen/go/v1/usage`。
 - OpenCode Go 订阅额度不出现在菜单栏、悬浮窗及二者设置中，也不注入主窗口统计 / Timeline / Cycles / 按服务 / 按提供商 / 按模型；`SettingsStore.usageServiceVisibility` 不新增独立 Go 开关。
 - Go 订阅额度接入不触发 `UsageApp`、`ModelProvider` 或 Agent 对话归并规则变更；现有 `OpencodeScanner` 的 SQLite 扫描路径与 prefix 剥离路径都不动，使用 `opencode-go/<model-id>` 的既有对话仍正常进入 Token 与预估费用统计。
-- Go 卡片不复用 `opencodeTodayCost`，不展示今日 / 本周费用；本地日志 full rebuild 与 Go 额度互不影响。
+- Go 卡片不复用本地 OpenCode 今日费用，不展示今日 / 本周费用；本地日志 full rebuild 与 Go 额度互不影响。
 - 请求使用 CCBar 专用 `User-Agent`；日志只记录固定错误类别和必要 HTTP 状态，不记录 key、摘要或响应 body。
 - 不调用 OpenCode OAuth、不写 OpenCode SQLite / UserDefaults / cc-bar Keychain。
 - 首版 `ServiceTile` fallback 显示字母 `G`，不要求新增 SVG 或 SF Symbol 特例。

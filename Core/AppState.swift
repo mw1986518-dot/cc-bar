@@ -141,9 +141,6 @@ final class AppState {
 
     var codexTodayCost: Decimal?
     var claudeTodayCost: Decimal?
-    var cursorTodayCost: Decimal?
-    var piTodayCost: Decimal?
-    var opencodeTodayCost: Decimal?
 
     /// OpenAI / Anthropic / Cursor statuspage.io 最新快照,失败时保留上一份。
     var codexServiceStatus: ServiceStatus?
@@ -472,28 +469,37 @@ final class AppState {
         }
     }
 
+    /// 启动时把缓存快照补记进周期。采样时刻取缓存自身的 `updatedAt`：用启动时刻会把
+    /// `lastSampleAt` 推到现在，掩盖 App 未运行期间结束的周期应有的「不完整」标记。
+    /// 缓存必须属于当前账号（`accountID` 为写入时的周期账号键）；App 未运行期间切换过账号，
+    /// 或旧版缓存没有账号键时跳过，等首次实时刷新再记录，避免旧账号快照记到新账号名下。
     private func recordCachedQuotaCycleObservations() {
-        let observedAt = Date()
         if let record = quotaCache.codex, codexAccount != nil {
-            recordQuotaCycles(
-                accountKey: QuotaHistoryAccountKey.codexPrimary(accountId: codexAccount?.accountId),
-                app: .codex,
-                snapshot: record.snapshot,
-                source: .cache,
-                sampledAt: observedAt
-            )
+            let accountKey = QuotaHistoryAccountKey.codexPrimary(accountId: codexAccount?.accountId)
+            if record.accountID == accountKey {
+                recordQuotaCycles(
+                    accountKey: accountKey,
+                    app: .codex,
+                    snapshot: record.snapshot,
+                    source: .cache,
+                    sampledAt: record.updatedAt
+                )
+            }
         }
         if let record = quotaCache.claude, claudeAccount != nil {
-            recordQuotaCycles(
-                accountKey: QuotaHistoryAccountKey.claudePrimary(
-                    email: claudeAccount?.email,
-                    accountUuid: claudeAccount?.accountUuid
-                ),
-                app: .claude,
-                snapshot: record.snapshot,
-                source: .cache,
-                sampledAt: observedAt
+            let accountKey = QuotaHistoryAccountKey.claudePrimary(
+                email: claudeAccount?.email,
+                accountUuid: claudeAccount?.accountUuid
             )
+            if record.accountID == accountKey {
+                recordQuotaCycles(
+                    accountKey: accountKey,
+                    app: .claude,
+                    snapshot: record.snapshot,
+                    source: .cache,
+                    sampledAt: record.updatedAt
+                )
+            }
         }
         // Antigravity 暂无本地用量周期，仅记录额度历史，不参与 cycle 统计
     }
@@ -1813,11 +1819,17 @@ final class AppState {
         codexRefreshState.lastErrorIsNetwork = false
         codexRefreshState.backoffUntil = nil
         codexRefreshState.source = source
-        quotaCache.codex = QuotaCacheRecord(snapshot: mergedSnapshot, source: source, updatedAt: updatedAt)
+        let accountKey = QuotaHistoryAccountKey.codexPrimary(accountId: codexAccount?.accountId)
+        quotaCache.codex = QuotaCacheRecord(
+            snapshot: mergedSnapshot,
+            source: source,
+            updatedAt: updatedAt,
+            accountID: accountKey
+        )
         saveQuotaCache()
         recordCodexQuotaHistory(snapshot: mergedSnapshot, sampledAt: updatedAt)
         recordQuotaCycles(
-            accountKey: QuotaHistoryAccountKey.codexPrimary(accountId: codexAccount?.accountId),
+            accountKey: accountKey,
             app: .codex,
             snapshot: mergedSnapshot,
             source: source,
@@ -1838,14 +1850,20 @@ final class AppState {
             claudeRefreshState.backoffUntil = nil
         }
         claudeRefreshState.source = source
-        quotaCache.claude = QuotaCacheRecord(snapshot: mergedSnapshot, source: source, updatedAt: updatedAt)
+        let accountKey = QuotaHistoryAccountKey.claudePrimary(
+            email: claudeAccount?.email,
+            accountUuid: claudeAccount?.accountUuid
+        )
+        quotaCache.claude = QuotaCacheRecord(
+            snapshot: mergedSnapshot,
+            source: source,
+            updatedAt: updatedAt,
+            accountID: accountKey
+        )
         saveQuotaCache()
         recordClaudeQuotaHistory(snapshot: mergedSnapshot, sampledAt: updatedAt)
         recordQuotaCycles(
-            accountKey: QuotaHistoryAccountKey.claudePrimary(
-                    email: claudeAccount?.email,
-                    accountUuid: claudeAccount?.accountUuid
-                ),
+            accountKey: accountKey,
             app: .claude,
             snapshot: mergedSnapshot,
             source: source,

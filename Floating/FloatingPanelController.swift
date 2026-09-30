@@ -10,6 +10,8 @@ final class FloatingPanelController: NSObject {
     private weak var appState: AppState?
     private var observers: [NSObjectProtocol] = []
     private var snapTask: Task<Void, Never>?
+    /// 右键菜单「设置」的入口；`openWindow` 只在 SwiftUI 环境里可用，由 App 层注入。
+    var openSettingsHandler: (() -> Void)?
 
     /// 默认窗口大小（实际大小由 SwiftUI fixedSize 收缩决定，这里只是初始 contentRect）
     private static let defaultSize = CGSize(width: 160, height: 64)
@@ -65,6 +67,29 @@ final class FloatingPanelController: NSObject {
         panel?.orderOut(nil)
     }
 
+    // MARK: Context menu
+
+    /// 右键 / Control-点击菜单：隐藏悬浮窗（等同关闭总开关）、打开设置。
+    fileprivate func makeContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        let hideItem = NSMenuItem(title: tr("Hide HUD", "隐藏"), action: #selector(hideFromMenu), keyEquivalent: "")
+        hideItem.target = self
+        menu.addItem(hideItem)
+        let settingsItem = NSMenuItem(title: tr("Settings", "设置"), action: #selector(openSettingsFromMenu), keyEquivalent: "")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+        return menu
+    }
+
+    @objc private func hideFromMenu() {
+        SettingsStore.shared.floatingEnabled = false
+        sync()
+    }
+
+    @objc private func openSettingsFromMenu() {
+        openSettingsHandler?()
+    }
+
     private func buildPanel(appState: AppState) {
         let settings = SettingsStore.shared
         let content = AnyView(
@@ -72,6 +97,7 @@ final class FloatingPanelController: NSObject {
                 .environment(appState)
         )
         let hosting = DraggableHostingView(rootView: content)
+        hosting.contextMenuProvider = { [weak self] in self?.makeContextMenu() }
         hosting.translatesAutoresizingMaskIntoConstraints = false
         // hosting view 的 layer 默认会用系统底色填满矩形 content,会在 SwiftUI 圆角外露出"直角边"。
         // 强制 layer 透明,圆角外的像素就由窗口的透明背景接管,NSPanel 也会按真实 alpha 画阴影。
@@ -189,6 +215,7 @@ final class FloatingPanelController: NSObject {
 ///
 /// 代价:悬浮窗内所有 SwiftUI 点击/手势都失效。当前 HUD 只有 tile、进度条和文本,
 /// 没有可交互控件;后续若要加点击交互,需要改成只在局部区域放行拖拽。
+/// 右键与 Control-点击在这里直接弹出原生菜单(`contextMenuProvider`),不进入拖拽。
 ///
 /// 这里**刻意不做成泛型**。Swift 6.2.4 在 Release(-O)下编译泛型 NSHostingView 子类的
 /// 隐式 deinit 时,SILPerformanceInliner 的 isCallerAndCalleeLayoutConstraintsCompatible
@@ -201,7 +228,21 @@ private final class DraggableHostingView: NSHostingView<AnyView> {
         super.hitTest(point) == nil ? nil : self
     }
 
+    var contextMenuProvider: (() -> NSMenu?)?
+
     override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control), showContextMenu(for: event) { return }
         window?.performDrag(with: event)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        if showContextMenu(for: event) { return }
+        super.rightMouseDown(with: event)
+    }
+
+    private func showContextMenu(for event: NSEvent) -> Bool {
+        guard let menu = contextMenuProvider?() else { return false }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+        return true
     }
 }

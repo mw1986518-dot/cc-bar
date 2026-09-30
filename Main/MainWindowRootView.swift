@@ -5,6 +5,10 @@ enum MainTab: Hashable {
     case settings
 }
 
+enum MainWindowLayout {
+    static let sidebarWidth: CGFloat = 200
+}
+
 struct MainWindowRootView: View {
     @Environment(AppState.self) private var appState
 
@@ -20,6 +24,9 @@ struct MainWindowRootView: View {
                 .tag(MainTab.settings)
         }
         .frame(minWidth: 1040, minHeight: 520)
+        // 显式隐藏窗口工具栏背景，让两个页面的侧栏材质铺进标题栏。
+        // 不写时由 SwiftUI 按内容推断，首次打开窗口推断不生效，标题栏会画成整条不透明白底。
+        .toolbarBackground(.hidden, for: .windowToolbar)
         .background(InitialFirstResponderClearer())
         .onAppear {
             NSApp.setActivationPolicy(.regular)

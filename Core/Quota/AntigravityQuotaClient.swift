@@ -274,7 +274,8 @@ nonisolated enum AntigravityQuotaClient {
         if let buckets = root["buckets"] as? [[String: Any]] {
             let parsed = parseBuckets(buckets, fetchedAt: fetchedAt)
             // 与顶层 quotaInfo 反序不同：buckets 是 retrieveUserQuota 的主数据，信息最全，
-            // 新解析值整体取代旧值（含 nil），保证富化第三段能真实覆盖早期宽松窗口。
+            // 新解析值非 nil 时覆盖旧值，保证富化第三段能真实覆盖早期宽松窗口；
+            // buckets 缺某个窗口（nil）时保留 quotaInfo 解析出的旧值。
             fiveHour = parsed.fiveHour ?? fiveHour
             weekly = parsed.weekly ?? weekly
             geminiWindow = parsed.geminiWindow ?? geminiWindow

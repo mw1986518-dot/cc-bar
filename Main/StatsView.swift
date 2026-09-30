@@ -135,15 +135,32 @@ enum StatsRange: Hashable, CaseIterable {
         return cal.date(from: comps) ?? fallback
     }
 
-    /// 上一个等长区间(用于 delta 对比)。`.all` / `.custom` 返回 nil(无法对比)。
+    /// delta 对比区间。`.all` / `.custom` 返回 nil(无法对比)。
+    /// 本周 / 本月 / 本年是进行中的周期：对比上一周期从起点起的同样天数(周三的「本周」
+    /// 对比上周一～周三)，不越过本周期起点；其余范围对比紧邻的上一个等长区间。
     func previousBounds(now: Date = Date(), customFrom: Date, customTo: Date) -> (from: Date, to: Date)? {
+        let periodComponent: Calendar.Component?
         switch self {
         case .all, .custom:
             return nil
+        case .thisWeek:
+            periodComponent = .weekOfYear
+        case .thisMonth:
+            periodComponent = .month
+        case .thisYear:
+            periodComponent = .year
         default:
-            break
+            periodComponent = nil
         }
         let current = bounds(now: now, customFrom: customFrom, customTo: customTo)
+        if let periodComponent {
+            let cal = Self.weekStartMondayCalendar
+            guard let previousStart = cal.date(byAdding: periodComponent, value: -1, to: current.from),
+                  let elapsedDays = cal.dateComponents([.day], from: current.from, to: current.to).day,
+                  let previousEnd = cal.date(byAdding: .day, value: elapsedDays, to: previousStart)
+            else { return nil }
+            return (previousStart, min(previousEnd, current.from))
+        }
         let length = current.to.timeIntervalSince(current.from)
         guard length > 0, length.isFinite else { return nil }
         return (current.from.addingTimeInterval(-length), current.from)
@@ -383,20 +400,18 @@ struct StatsView: View {
     @State private var pendingNavigation: StatsNavigationRequest?
     /// 概览 / 额度页的滚动画布是否已离开顶部，决定顶栏分隔线是否显示（见 `showsTopBarDivider`）。
     @State private var canvasScrolled = false
-    /// 一屏高度分配的实测值（规则见 `overviewBottomRowMinHeight`）：概览 KPI 行、概览下排、
-    /// 额度页整页内容、额度页账号面板网格、各账号面板除折线图外的高度。
+    /// 一屏高度分配的实测值（规则见 `overviewBottomRowMinHeight`）：概览 KPI 行、概览下排。
     @State private var overviewTopHeight: CGFloat = 0
     @State private var overviewBottomHeight: CGFloat = 0
-    @State private var quotaContentHeight: CGFloat = 0
-    @State private var quotaGridHeight: CGFloat = 0
-    @State private var quotaPanelChromeHeights: [String: CGFloat] = [:]
 
     var body: some View {
         HStack(spacing: 0) {
             sidebar
-                .frame(width: 200)
+                .frame(width: MainWindowLayout.sidebarWidth)
 
+            // 与侧栏材质一起延伸进标题栏，侧栏右边界从上到下是同一条线。
             Divider()
+                .ignoresSafeArea(.container, edges: .top)
 
             VStack(spacing: 0) {
                 StatsUsageErrorBanner()
@@ -476,14 +491,15 @@ struct StatsView: View {
     static let wideCanvasWidth: CGFloat = 880
 
     /// 默认窗口 1440×900 下的一屏高度分配：概览下排（用量构成 + 高消耗对话）至少 390pt，
-    /// 用量柱状图那一排吃掉剩余高度、260~300pt；额度页折线图吃掉剩余高度、最低 170pt。
-    /// 用量构成列表区固定高度、内部滚动，不会撑高下排；额度页展开变动明细时由折线图让出高度，降到下限后整页滚动。
+    /// 用量柱状图那一排吃掉剩余高度、260~300pt。
+    /// 用量构成列表区固定高度、内部滚动，不会撑高下排。
     static let overviewBottomRowMinHeight: CGFloat = 390
     static let overviewUsageRowMinHeight: CGFloat = 260
     /// 柱状图那一排的上限：窗口比默认高很多时不再继续拉高，多出的高度留在页面底部，
     /// 避免图表和 Token 拆分被拉成细长比例、面板内部出现大块空白。
     static let overviewUsageRowMaxHeight: CGFloat = 300
-    static let quotaTimelineChartMinHeight: CGFloat = 170
+    /// 额度页折线图固定高度：不随画布拉伸，展开变动明细时面板向下变长、整页滚动，不压缩图表。
+    static let quotaTimelineChartHeight: CGFloat = 200
 
     @ViewBuilder
     private func mainContent(canvasWidth: CGFloat, canvasHeight: CGFloat) -> some View {
@@ -492,7 +508,7 @@ struct StatsView: View {
         case .overview:
             overviewContent(canvasWidth: canvasWidth, canvasHeight: canvasHeight, isWide: isWide)
         case .quota:
-            quotaContent(canvasHeight: canvasHeight, isWide: isWide)
+            quotaContent(isWide: isWide)
         case .conversations, .projects:
             EmptyView()
         }
@@ -569,7 +585,7 @@ struct StatsView: View {
         }
     }
 
-    private func quotaContent(canvasHeight: CGFloat, isWide: Bool) -> some View {
+    private func quotaContent(isWide: Bool) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             if quotaApps.isEmpty {
                 VStack(spacing: 8) {
@@ -590,17 +606,15 @@ struct StatsView: View {
                 .ccPanel(cornerRadius: 12)
             } else {
                 QuotaCycleCardsSection(apps: quotaApps, isWide: isWide)
-                quotaTimelineSection(canvasHeight: canvasHeight, isWide: isWide)
+                quotaTimelineSection(isWide: isWide)
             }
         }
-        .onHeightChange { quotaContentHeight = $0 }
         .padding([.horizontal, .bottom], 20)
     }
 
-    private func quotaTimelineSection(canvasHeight: CGFloat, isWide: Bool) -> some View {
+    private func quotaTimelineSection(isWide: Bool) -> some View {
         let sections = timelineSections
         let columns = isWide ? 2 : 1
-        let chartHeight = quotaTimelineChartHeight(canvasHeight: canvasHeight, sections: sections, columns: columns)
         return VStack(alignment: .leading, spacing: 12) {
             timelineHeader
             if sections.isEmpty {
@@ -619,28 +633,12 @@ struct StatsView: View {
                         QuotaTimelineAccountPanel(
                             section: section,
                             selectedKind: timelineWindow,
-                            chartHeight: chartHeight
-                        ) { chrome in
-                            quotaPanelChromeHeights[section.accountKey] = chrome
-                        }
+                            chartHeight: Self.quotaTimelineChartHeight
+                        )
                     }
                 }
-                .onHeightChange { quotaGridHeight = $0 }
             }
         }
-    }
-
-    /// 额度页折线图高度：账号面板只有一行时，让最高那个面板的底边落在画布底部；
-    /// 多于一行时页面本来就要滚动，保持下限高度。
-    /// 面板以上的高度 = 整页内容高 − 面板网格高，二者都随折线图同步变化，差值与图高无关。
-    private func quotaTimelineChartHeight(canvasHeight: CGFloat, sections: [QuotaTimelineSection], columns: Int) -> CGFloat {
-        let chrome = sections.compactMap { quotaPanelChromeHeights[$0.accountKey] }.max() ?? 0
-        let above = quotaContentHeight - quotaGridHeight
-        guard sections.count <= columns, quotaGridHeight > 0, above > 0, chrome > 0 else {
-            return Self.quotaTimelineChartMinHeight
-        }
-        let remaining = canvasHeight - 20 - above - chrome
-        return max(Self.quotaTimelineChartMinHeight, remaining.rounded(.down))
     }
 
     // MARK: Sidebar
@@ -828,8 +826,8 @@ struct StatsView: View {
                 .frame(maxWidth: .infinity, alignment: .trailing)
         case .quota:
             Text(tr(
-                "Current quota cycles and how quota changed.",
-                "当前额度周期的用量，以及额度的变化记录。"
+                "Full-quota estimates for current cycles, and how quota changed.",
+                "当前额度周期的用满预估，以及额度的变化记录。"
             ))
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
@@ -1832,6 +1830,8 @@ private struct OverviewCompositionPanel: View {
                         .truncationMode(.middle)
                 }
             }
+            // 名称优先于 Spacer 取宽：长模型名先吃掉空白再截断。
+            .layoutPriority(1)
             Spacer(minLength: 8)
             // Tokens 与费用是本面板的主数据：紧跟名称、13pt semibold，比同页 12.5pt 的数值略重；
             // 占比已由顶部占比条表达，与缓存命中率一起降为次级。
@@ -2350,7 +2350,15 @@ struct StatsTopBar<Detail: View>: View {
 
     private func customDates(from: Binding<Date>, to: Binding<Date>) -> some View {
         HStack(spacing: 6) {
-            DatePicker(tr("From", "起"), selection: from, displayedComponents: .date)
+            // 「止」只能晚于「起」；把「起」调到「止」之后时同步推后「止」，
+            // 否则 AppKit 只钳制显示、绑定值不变，区间会静默变空。
+            DatePicker(tr("From", "起"), selection: Binding(
+                get: { from.wrappedValue },
+                set: { newValue in
+                    from.wrappedValue = newValue
+                    if to.wrappedValue < newValue { to.wrappedValue = newValue }
+                }
+            ), displayedComponents: .date)
             Text("–")
                 .foregroundStyle(.secondary)
             DatePicker(tr("To", "止"), selection: to, in: from.wrappedValue..., displayedComponents: .date)
@@ -2661,10 +2669,13 @@ struct KPICard: View {
                 if let app {
                     ServiceTile(app: app, size: 12)
                 }
+                // 标签优先于 Spacer 取宽，避免「文字截断、右侧仍留白」；
+                // delta 固定理想宽度，卡片过窄时先截标签而不是截百分比。
                 Text(tr(english, chinese))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .layoutPriority(1)
                 Spacer(minLength: 6)
                 if let delta, delta != 0 {
                     Text(formatDelta(delta))
@@ -2672,6 +2683,7 @@ struct KPICard: View {
                         .monospacedDigit()
                         .foregroundStyle(delta >= 0 ? Color.red : Color.green)
                         .lineLimit(1)
+                        .fixedSize()
                 }
             }
             // 主值统一 primary；服务识别色只留在标签前的 12pt tile 上（设计风格 §4.2）。
@@ -2751,10 +2763,8 @@ private struct QuotaTimelineAccountPanel: View {
     let section: QuotaTimelineSection
     /// 全局选定的窗口视角，所有账号使用同一口径。
     let selectedKind: QuotaLimitKind
-    /// 折线图高度由额度页按画布剩余高度给出（见 `StatsView.quotaTimelineChartMinHeight`）。
+    /// 折线图固定高度（见 `StatsView.quotaTimelineChartHeight`），展开变动明细不影响图高。
     let chartHeight: CGFloat
-    /// 报告面板除折线图外的高度（含展开的变动明细），额度页据此算折线图高度。
-    let onChromeHeightChange: (CGFloat) -> Void
 
     /// 变动明细默认收起，保证额度页在默认窗口内一屏看完。
     @State private var showsDetails = false
@@ -2771,15 +2781,6 @@ private struct QuotaTimelineAccountPanel: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .ccPanel(cornerRadius: 12)
-        .onHeightChange { height in
-            // 没有折线图的面板（无数据）不参与折线图高度计算。
-            onChromeHeightChange(showsChart ? height - chartHeight : 0)
-        }
-    }
-
-    private var showsChart: Bool {
-        guard let window = activeWindow else { return false }
-        return !mergedEntries(in: window).isEmpty
     }
 
     /// 当前 Picker 是全局语义；无对应数据时保留空态，不能悄悄回退到另一种窗口。
@@ -2806,7 +2807,7 @@ private struct QuotaTimelineAccountPanel: View {
             Spacer()
             if let window = activeWindow {
                 timelineMetric(
-                    label: tr("Current", "当前"),
+                    label: tr("Remaining", "剩余"),
                     value: currentText(window),
                     color: statusColor(remainingPercent: window.currentRemaining.map { Double($0) }, tint: section.tint)
                 )
@@ -2954,12 +2955,14 @@ private struct QuotaTimelineAccountPanel: View {
 
     /// 「窗口重置」参考线：5H 取当前窗口的起点（下次重置 − 5 小时），
     /// 周视图取当前周期起点。都晚于现在或推不出时不画。
+    /// 快照过期、已知的下次重置已经过去时，5H 窗口从首次使用起算、没有固定网格，
+    /// 无法推出当前窗口，只画最近一次确知发生的重置时刻。
     private func windowResetTime(for window: QuotaTimelineWindow, entries: [QuotaTimelineEntry]) -> Date? {
         let now = Date()
         switch window.kind {
         case .fiveHour:
             guard let next = window.resetsAt ?? entries.last(where: { $0.resetsAt != nil })?.resetsAt else { return nil }
-            var start = next.addingTimeInterval(-5 * 3600)
+            var start = next <= now ? next : next.addingTimeInterval(-5 * 3600)
             while start > now { start.addTimeInterval(-5 * 3600) }
             return Calendar.current.isDate(start, inSameDayAs: now) ? start : nil
         case .weekly:

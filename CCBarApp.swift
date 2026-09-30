@@ -58,6 +58,11 @@ private struct MenuBarLabelRoot: View {
                 guard !AppRuntime.isRunningUnitTests else { return }
                 await appState.bootstrap()
                 FloatingPanelController.shared.attach(appState: appState)
+                FloatingPanelController.shared.openSettingsHandler = {
+                    appState.mainTab = .settings
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: "main")
+                }
                 FloatingPanelController.shared.sync()
             }
             .onChange(of: appState.shouldShowOnboarding) { _, show in

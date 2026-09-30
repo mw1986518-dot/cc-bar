@@ -604,14 +604,27 @@ enum CCRefreshState {
 // 自定义按钮上,弥补 SwiftUI 默认按钮在 macOS 上无光标提示的问题。
 
 private struct PointingHandCursor: ViewModifier {
+    /// 记录本视图是否已 push，保证 push / pop 严格配对：视图在悬停中被移除
+    /// （Popover 关闭、分段控件按 id 重建）时收不到 onHover(false)，由 onDisappear 补 pop，
+    /// 否则光标栈残留一层手型，移到别处仍是手型。
+    @State private var didPush = false
+
     func body(content: Content) -> some View {
-        content.onHover { hovering in
-            if hovering {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pop()
+        content
+            .onHover { hovering in
+                if hovering, !didPush {
+                    NSCursor.pointingHand.push()
+                    didPush = true
+                } else if !hovering, didPush {
+                    NSCursor.pop()
+                    didPush = false
+                }
             }
-        }
+            .onDisappear {
+                guard didPush else { return }
+                NSCursor.pop()
+                didPush = false
+            }
     }
 }
 

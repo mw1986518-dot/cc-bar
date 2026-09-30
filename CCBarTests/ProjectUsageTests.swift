@@ -1,7 +1,7 @@
 import XCTest
 @testable import CCBar
 
-/// 统计页改版的数据口径：项目汇总、worktree 归入主仓库、未归属残差、构成合并规则、周期按项目拆分。
+/// 统计页改版的数据口径：项目汇总、worktree 归入主仓库、未归属残差、构成合并规则、周期对话维度。
 final class ProjectUsageTests: XCTestCase {
     private let calendar = Calendar.current
     private var tempRoot: URL!
@@ -270,34 +270,7 @@ final class ProjectUsageTests: XCTestCase {
         XCTAssertEqual(result.overviewTotals.totalTokens, 180)
     }
 
-    // MARK: - 周期按项目拆分
-
-    func testCycleProjectSplitSumsToOfficialPercent() {
-        let identities: [String: StatsProjectIdentity] = [
-            "a": identity("alpha"), "b": identity("beta"), "c": identity("gamma"),
-            "h": StatsProjectIdentity(key: "special:unassigned", name: "", path: "", status: .unassigned)
-        ]
-        let usage: [String?: UsageTotals] = [
-            "a": totals(tokens: 10, cost: 5),
-            "b": totals(tokens: 10, cost: 3),
-            "c": totals(tokens: 10, cost: 1),
-            "h": totals(tokens: 10, cost: 1),
-            nil: totals(tokens: 10, cost: 0)
-        ]
-        let segments = CycleProjectSplit.segments(
-            usage: usage, usedPercent: 40, identity: { identities[$0] }, restName: "其他"
-        )
-        XCTAssertEqual(segments.map(\.name), ["alpha", "beta", "其他"])
-        XCTAssertEqual(segments[0].percent, 20, accuracy: 1e-9)
-        XCTAssertEqual(segments[1].percent, 12, accuracy: 1e-9)
-        XCTAssertEqual(segments.reduce(0) { $0 + $1.percent }, 40, accuracy: 1e-9)
-
-        let remoteOnly = CycleProjectSplit.segments(usage: [:], usedPercent: 25, identity: { identities[$0] }, restName: "其他")
-        XCTAssertEqual(remoteOnly.map(\.name), ["其他"])
-        XCTAssertEqual(remoteOnly.first?.percent, 25)
-
-        XCTAssertTrue(CycleProjectSplit.segments(usage: usage, usedPercent: 0, identity: { identities[$0] }, restName: "其他").isEmpty)
-    }
+    // MARK: - 周期对话维度
 
     func testCycleBucketsKeepConversationKeyWithoutChangingVector() {
         let start = day(2026, 3, 1)

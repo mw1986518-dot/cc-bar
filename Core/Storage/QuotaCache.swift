@@ -4,7 +4,8 @@ nonisolated struct QuotaCacheRecord: Sendable, Equatable, Codable {
     var snapshot: QuotaSnapshot
     var source: QuotaSnapshotSource
     var updatedAt: Date
-    /// 仅远端账号型 Provider 使用；Cursor 绑定 JWT userID，防止账号切换串缓存。
+    /// 账号绑定，防止账号切换串缓存。Cursor 为 JWT userID；Codex / Claude 为写入时的
+    /// 周期账号键（`QuotaHistoryAccountKey`），仅用于启动补记周期时校验账号，旧缓存为 nil。
     var accountID: String?
 
     init(

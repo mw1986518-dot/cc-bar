@@ -82,7 +82,8 @@ private struct ImportedCodexRow: View {
                         .lineLimit(1)
                 }
             }
-            .frame(width: 52, alignment: .leading)
+            // 与主卡标签列同宽，`codex-work` 这类常见别名不再截断。
+            .frame(width: 72, alignment: .leading)
 
             // 右：服务端主要额度 + 可选次要额度
             if let snap = snapshot {
@@ -188,13 +189,11 @@ private struct ImportedCodexRow: View {
             return ""
         }
         var parts: [String] = []
-        if let email = account.email, !email.isEmpty { parts.append(email) }
+        // 有别名时名称不含 email，subtitle 补上 email；无别名时名称已是 email 用户名，不再重复。
+        // email 可空（PAT 导入、无 email claim），此时仍保留 plan。
+        if let email = account.email, !email.isEmpty, !account.alias.isEmpty { parts.append(email) }
         if let plan = account.planType, !plan.isEmpty { parts.append(plan.capitalized) }
-        if let email = account.email, !email.isEmpty, !account.alias.isEmpty {
-            // 有别名时 subtitle 只显示 email · plan
-            return parts.joined(separator: " · ")
-        }
-        return parts.dropFirst().joined(separator: " · ")
+        return parts.joined(separator: " · ")
     }
 
     private func rowColor(window: QuotaWindow?) -> Color {

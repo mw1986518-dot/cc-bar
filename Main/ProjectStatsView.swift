@@ -727,6 +727,7 @@ private struct ProjectDetailView: View {
                             .font(.system(size: 11.5, design: .monospaced))
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            .layoutPriority(1)
                         Spacer(minLength: 6)
                         Text("\(StatsFormatter.compactToken(model.totals.totalTokens))")
                             .font(.system(size: 10.5))

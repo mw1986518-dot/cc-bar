@@ -60,7 +60,9 @@ struct SettingsRootView: View {
 
         HStack(spacing: 0) {
             sidebar
+            // 与侧栏材质一起延伸进标题栏，侧栏右边界从上到下是同一条线。
             Divider()
+                .ignoresSafeArea(.container, edges: .top)
             contentArea(settings: settings)
         }
         .sheet(isPresented: $showCommandCodeSheet) {
@@ -107,7 +109,7 @@ struct SettingsRootView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 14)
-        .frame(width: 200)
+        .frame(width: MainWindowLayout.sidebarWidth)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(.regularMaterial)
     }

@@ -2158,8 +2158,5 @@ final class UsageService {
         guard let appState else { return }
         appState.codexTodayCost = aggregator.todayCost(for: .codex)
         appState.claudeTodayCost = aggregator.todayCost(for: .claude)
-        appState.cursorTodayCost = aggregator.todayCost(for: .cursor)
-        appState.piTodayCost = aggregator.todayCost(for: .pi)
-        appState.opencodeTodayCost = aggregator.todayCost(for: .opencode)
     }
 }

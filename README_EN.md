@@ -55,7 +55,7 @@
   * **Overview**: Total tokens, costs, per-service costs, and changes from the previous period; stacked usage charts, token breakdowns, and cache hit rate. Switch usage composition between service, provider, model, and project, or open a top conversation directly. A single-period selection expands the daily chart to 30 days, or weekly / monthly charts to 14 periods; totals still cover only the selected range.
   * **Conversations**: Filter by service or project, search titles or projects, and sort by recent activity, tokens, or cost. Details cover the conversation's entire history: input, output, cache writes and reads, requests, cache hit rate, models, Standard / Fast tiers, and cost breakdowns.
   * **Projects**: Tokens, costs, conversation counts, and active days by project, with daily trends, tools and models, branches, and top conversations. Recognized Git worktrees roll up into their main repository, with individual worktree details. Cursor remote usage, backfills, and early daily-only history appear separately as Unattributed.
-  * **Quota**: Current Codex and Claude Code 5-hour / weekly local usage, projected full-quota usage, estimated project breakdowns, and reset countdowns on one page. Quota history below shows today in the 5-hour view, or the current and previous cycles based on official reset times in the weekly view, with separate sections for each account.
+  * **Quota**: Current Codex and Claude Code 5-hour / weekly local usage, projected full-quota usage, official quota usage percentages, and reset countdowns on one page. Quota history below shows today in the 5-hour view, or the current and previous cycles based on official reset times in the weekly view, with separate sections for each account.
 * **Cost estimates and pricing** — Local costs use recorded log costs or model-based estimates to compare consumption; they are not subscription bills. Cursor uses service-side metered costs. Pricing supports Codex Standard / Fast and long-context tiers, Claude cache TTLs and advisor usage. The built-in catalog includes GPT-6.1 Sol, Claude, DeepSeek, and Command Code model variants, supplemented by LiteLLM / models.dev. Price updates do not reprice history automatically; use Recalculate usage in Settings.
 * **History protection and verified recalculation** — Daily totals, conversations, cycle usage, and scan progress are saved together. A damaged current snapshot can fall back to the previous complete snapshot. Recalculation checks against preserved history first; incomplete reads, usage mismatches, or save failures retain the original data and display a warning. Incomplete results from cleaned-up source logs do not directly overwrite history.
 
@@ -87,7 +87,7 @@
 
 <p align="center">
   <img src="docs/Screenshots/statistics-quota.png" width="720" alt="Quota Monitoring"><br>
-  <sub><b>Quota Monitoring</b>: Current 5-hour and weekly usage for Codex and Claude Code, with estimated project breakdowns and quota change history</sub>
+  <sub><b>Quota Monitoring</b>: Current 5-hour and weekly usage for Codex and Claude Code, with official quota usage percentages and quota change history</sub>
 </p>
 
 <p align="center">
