@@ -202,6 +202,10 @@ final class AppState {
         maybeShowKeychainPrompt()
         await loadClaude()
         await loadAntigravity()
+        // 新安装时 Antigravity 只在检测到凭据时保持默认开启，未登录的机器不显示空卡片。
+        if SettingsStore.shared.isFreshInstall, antigravityAccount == nil {
+            SettingsStore.shared.showAntigravity = false
+        }
         // Cursor 只读本机 SQLite，用于账号页和 Onboarding 的登录态检测；
         // 是否请求其远端额度仍由 Provider / Stats 开关控制。
         await loadCursor()

@@ -225,7 +225,7 @@ final class SettingsStore {
     /// 截图隐私模式：全局隐藏账号、项目及对话身份；保留真实用量统计。
     var privacyMode: Bool { didSet { defaults.set(privacyMode, forKey: Keys.privacyMode) } }
 
-    /// 启动时自动检查 GitHub 是否有新版本(默认关;手动检查始终可用)
+    /// 启动时自动检查 GitHub 是否有新版本(默认开;只读静态版本清单,手动检查始终可用)
     var autoCheckForUpdates: Bool { didSet { defaults.set(autoCheckForUpdates, forKey: Keys.autoCheckForUpdates) } }
 
     /// 详细日志(默认关)。打开后 `AppLog` 的 debug 级别才落盘,排查完建议关掉。
@@ -247,8 +247,14 @@ final class SettingsStore {
         didSet { defaults.set(didCompleteOnboarding, forKey: Keys.didCompleteOnboarding) }
     }
 
+    /// 本次启动前从未保存过 Provider 显示设置（新安装）。只在内存里判断，不持久化；
+    /// 用于首次启动按凭据检测结果收敛默认开关，已装机用户不受影响。
+    let isFreshInstall: Bool
+
     private init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        isFreshInstall = defaults.data(forKey: Keys.providerDisplaySettings) == nil
+            && defaults.object(forKey: Keys.showCodex) == nil
         providerDisplaySettings = Self.loadProviderDisplaySettings(defaults: defaults)
         usageServiceVisibility = Self.loadUsageServiceVisibility(defaults: defaults)
         // 菜单栏
@@ -275,8 +281,8 @@ final class SettingsStore {
         let langRaw = defaults.string(forKey: Keys.appLanguage) ?? AppLanguage.system.rawValue
         appLanguage = AppLanguage(rawValue: langRaw) ?? .system
         launchAtLogin = Self.isLaunchAtLoginOn(SMAppService.mainApp.status)
-        privacyMode = defaults.object(forKey: Keys.privacyMode) as? Bool ?? true
-        autoCheckForUpdates = defaults.object(forKey: Keys.autoCheckForUpdates) as? Bool ?? false
+        privacyMode = defaults.object(forKey: Keys.privacyMode) as? Bool ?? false
+        autoCheckForUpdates = defaults.object(forKey: Keys.autoCheckForUpdates) as? Bool ?? true
         verboseLogging = defaults.object(forKey: Keys.verboseLogging) as? Bool ?? false
         didShowKeychainPrompt = defaults.object(forKey: Keys.didShowKeychainPrompt) as? Bool ?? false
         didCompleteOnboarding = defaults.object(forKey: Keys.didCompleteOnboarding) as? Bool ?? false

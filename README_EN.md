@@ -61,8 +61,8 @@
 
 ### 💻 Native Interface and Settings
 
-* **Services and accounts matrix** — Connection status and independent quota, menu bar, floating HUD, and analytics options in one table. Hiding a local analytics source preserves scanning and history so it remains available when re-enabled.
-* **Screenshot privacy mode** — Anonymize accounts, projects, and conversations; hide paths, branches, and IDs across analytics, the Popover, account settings, and related hints. Real costs, tokens, models, dates, and charts remain visible; original data is unchanged. Enable it in Settings → Appearance & Display → Privacy mode.
+* **Services and accounts matrix** — Connection status and independent quota, menu bar, floating HUD, and analytics options in one table. Hiding a local analytics source preserves scanning and history so it remains available when re-enabled. Codex and Claude Code are on by default, and Antigravity turns on when a sign-in is detected; Cursor, Command Code, and the floating HUD are off until you enable them in Settings.
+* **Screenshot privacy mode** — Anonymize accounts, projects, and conversations; hide paths, branches, and IDs across analytics, the Popover, account settings, and related hints. Real costs, tokens, models, dates, and charts remain visible; original data is unchanged. Off by default; enable it in Settings → Appearance & Display → Privacy mode.
 * **Native macOS experience** — Light / dark appearance, Chinese / English, silent launch at login, keyboard refresh, and manual or startup checks for GitHub Release updates.
 * **Local diagnostics** — Logs rotate automatically and are redacted by default. Export a diagnostic bundle in Settings to inspect and share yourself; the app never uploads it automatically.
 
@@ -126,7 +126,7 @@ Usage logs are parsed and stored locally. Quotas, Cursor remote metering, servic
 
 | Service / Tool | Credential Path | Access Mode | Behavior & Security Guarantees |
 | :--- | :--- | :---: | :--- |
-| **Codex** | `~/.codex/auth.json` | Read / Write | Automatically renews tokens via `refresh_token` near expiry. Re-reads the file before renewing to prevent race conditions with the `codex` CLI. |
+| **Codex** | `~/.codex/auth.json`<br>Imported accounts: CCBar's own Keychain items | Read / Write | Automatically renews tokens via `refresh_token` near expiry and writes new tokens back to where they came from. Re-reads the file before renewing to prevent race conditions with the `codex` CLI. |
 | **Claude Code** | `~/.claude/.credentials.json`<br>or macOS Keychain | **Strictly Read-Only** | **Never refreshes or writes credentials**. Anthropic refresh tokens are single-use; third-party rotation invalidates CLI sessions. Preserves the last snapshot and prompts for CLI re-login when expired; provides safe CLI fallback when needed. |
 | **Antigravity** | `~/.gemini/jetski-standalone-oauth-token`<br>`~/.gemini/oauth_creds.json` (fallback) | Read / Write | Reads the standalone OAuth token first and refreshes near expiry. Cloud Mode queries Google Cloud APIs directly without requiring local IDE processes. |
 | **Cursor** | `~/Library/Application Support/Cursor`<br>`/User/globalStorage/state.vscdb` | **Strictly Read-Only** | Reads only `cursorAuth/accessToken` to construct session cookies for usage queries. Never touches refresh tokens/OAuth and never writes back to SQLite or Keychain. |

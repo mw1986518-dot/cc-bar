@@ -61,8 +61,8 @@
 
 ### 💻 原生界面与设置
 
-* **服务与账号矩阵** — 在一张表里查看连接状态，分别配置额度服务、菜单栏、悬浮窗与用量统计；关闭本地统计展示后仍保留扫描和历史，重新开启可继续查看。
-* **截图隐私模式** — 匿名显示账号、项目与对话，遮挡路径、分支和 ID，覆盖统计页、Popover、账号设置及相关提示；保留真实金额、Tokens、模型、时间与图表，不修改原始数据。入口为「设置 → 外观与显示 → 隐私模式」。
+* **服务与账号矩阵** — 在一张表里查看连接状态，分别配置额度服务、菜单栏、悬浮窗与用量统计；关闭本地统计展示后仍保留扫描和历史，重新开启可继续查看。Codex 与 Claude Code 默认开启，Antigravity 检测到登录后默认开启；Cursor、Command Code 与桌面悬浮窗默认关闭，需在设置中手动开启。
+* **截图隐私模式** — 匿名显示账号、项目与对话，遮挡路径、分支和 ID，覆盖统计页、Popover、账号设置及相关提示；保留真实金额、Tokens、模型、时间与图表，不修改原始数据。默认关闭，入口为「设置 → 外观与显示 → 隐私模式」。
 * **macOS 原生体验** — 支持浅色 / 深色外观、中文 / English、静默开机自启、快捷键刷新，以及手动或启动时检查 GitHub Release 更新。
 * **本地诊断** — 日志自动轮转并默认脱敏；可在设置中导出诊断包，由用户自行检查和分享，应用不会自动上传。
 
@@ -126,7 +126,7 @@
 
 | 服务 / 目标 | 凭据存储位置 | 读写权限 | 行为机制与安全保障 |
 | :--- | :--- | :---: | :--- |
-| **Codex** | `~/.codex/auth.json` | 读 / 写 | 临期时使用 `refresh_token` 自动续期。续期前二次确认本地文件，避免与 `codex` CLI 冲突抢刷。 |
+| **Codex** | `~/.codex/auth.json`<br>导入的其他账号：CCBar 自己的 Keychain 条目 | 读 / 写 | 临期时使用 `refresh_token` 自动续期，新令牌写回原存储位置。续期前二次确认本地文件，避免与 `codex` CLI 冲突抢刷。 |
 | **Claude Code** | `~/.claude/.credentials.json`<br>或 macOS Keychain | **严格只读** | **绝不刷新或篡改凭据**。因 Anthropic 刷新令牌为一次性，第三方刷新会导致 CLI 被踢下线。过期时保留快照并提示终端重登；必要时提供安全 CLI 兜底。 |
 | **Antigravity** | `~/.gemini/jetski-standalone-oauth-token`<br>`~/.gemini/oauth_creds.json` (兜底) | 读 / 写 | 优先读取独立 OAuth Token，临期自动续期回写。Cloud Mode 直连 Google 云端 API，无需本地 IDE 运行。 |
 | **Cursor** | `~/Library/Application Support/Cursor`<br>`/User/globalStorage/state.vscdb` | **严格只读** | 仅读 `cursorAuth/accessToken` 构造 Cookie 查询用量，绝不碰 refresh token/OAuth，不写回 Cursor SQLite 或 Keychain。 |
