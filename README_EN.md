@@ -5,8 +5,8 @@
 <h1 align="center">cc-bar</h1>
 
 <p align="center">
-  <b>Native macOS AI Subscription Quota Monitor & Local Session Analytics</b><br>
-  Real-time remaining quotas for Codex, Claude Code, Antigravity, Cursor, and Command Code, with granular local token & cost analytics.
+  <b>Native macOS AI Quota Monitor & Usage Analytics</b><br>
+  View remaining quotas in the menu bar and analyze tokens, costs, and cache usage by conversation, project, and model.
 </p>
 
 <p align="center">
@@ -29,55 +29,70 @@
 
 <p align="center">
   <img src="docs/Screenshots/popover-light.png" width="360" alt="Popover Overview - Light Mode">
-  <img src="docs/Screenshots/popover-dark.png" width="360" alt="Popover Overview - Dark Mode">
+  <img src="docs/Screenshots/popover-dark.png" width="360" alt="Popover Overview - Dark Mode"><br>
+  <sub>Menu bar, floating HUD, and Popover · Light / Dark mode</sub>
 </p>
 
 ---
 
 ## ✨ Features
 
-### ⚡ Real-Time Multi-Service Quota Monitoring
-* **Comprehensive AI Assistant Support** — Native quota tracking and health awareness across 5 major AI coding companions:
-  * **Codex (OpenAI)**: 5-hour primary and weekly quotas with reset countdowns; import multiple Codex accounts side-by-side with expiration dates and bonus reset credits.
-  * **Claude Code (Anthropic)**: 5-hour and weekly quotas with specialized model (e.g. Fable) weekly allocations; transparent, safe CLI fallback refresh on API errors or expired credentials.
-  * **Antigravity (Google)**: Cloud Mode direct connection to Google Cloud APIs (without requiring local IDE/CLI processes), grouping Gemini 5H, Gemini Weekly, and Claude auxiliary quotas.
-  * **Cursor**: Direct connection to the official Usage API, displaying Total primary quota alongside Auto and API breakdown, automatically recognizing Unlimited with `∞` badges and aggregating today/week actual spend.
-  * **Command Code**: Shows the 5-hour primary and weekly quotas returned by the service (both cap and usage come from the API), plus monthly GOAT subscription Credits (monthly allowance 70).
-* **Menu Bar & Floating HUD** — Customizable menu bar percentages (primary, weekly, or both); independent desktop HUD overlay with per-service toggles, 20pt edge magnetic snapping, position persistence, and non-activating window behavior (never steals keyboard focus).
-* **Live Health & Smart Scheduling** — Dynamic relative timestamp ("refreshed Xs ago") rolling in the Popover header; embedded live health status dots for OpenAI, Anthropic and Cursor; quota polling (2 min by default), log scanning (5 min by default) and service status (fixed 5 min) share a single time base so due jobs wake up together, throttle down while the screen is locked or asleep, stop the clock during system sleep and refresh immediately on wake; 60s minimum interval between successes and a 10-minute backoff after a 429.
+### ⚡ Multi-Service Quota Monitoring
 
-### 📊 Local Usage & Cost Analytics
-* **Cross-Engine Log & Remote Metering Aggregation** — Automatically parses local session logs across Codex (with Standard/Fast tier mapping), Claude Code (with 5m/1h cache TTL differentiation), Pi (log total cost priority + catalog fallback), and OpenCode (`opencode.db` SQLite), combined with Cursor full-device remote metering.
-* **Four Dedicated Analytics Views**:
-  * **Overview**: Day / week / month granularity with the time range following the selected granularity (Today, This week, 4w, 6m, All, Custom, …); total and per-service KPI cards with period-over-period delta, token breakdown, horizontal service distribution bars, a stacked bar chart bucketed by granularity (a single-period range expands into a 14-period context window), plus by-model and by-provider breakdowns.
-  * **Conversations**: Drill down into individual chats with 4-way token breakdown (input, output, cache creation, cache read), cache hit ratios, execution speed indicators (`Fast` / `Mixed` badges), and API-equivalent cost estimations; secure project grouping without macOS permission prompts.
-  * **Cycles**: 2×2 grid tracking local token and cost consumption within Codex and Claude primary accounts' actual 5-hour and weekly reset windows, projecting burn-out time and reset countdowns based on official quota ratios.
-  * **Timeline**: The 5H view shows quota change events for the local day (00:00–24:00); the weekly view splits the current and previous cycle by the reset time the service reports, not by calendar week. Local samples are kept for 15 days, with one section per account.
-* **Model Provider Grouping (ModelProvider)** — Automatically classifies models across tools into 6 dedicated provider panels: OpenAI, Anthropic, DeepSeek, OpenCode-Go, Command Code, and Other; supports sorting by cost, tokens, requests, or name, with inline token breakdowns.
+* **Five quota services** — Codex, Claude Code, Antigravity, Cursor, and Command Code:
+  * **Codex**: 5-hour and weekly quotas with reset countdowns. Paste `auth.json` to view additional accounts side by side, including quota expiration and available reset credits, without switching the CLI sign-in.
+  * **Claude Code**: 5-hour, weekly, and model-specific quotas. Manual refresh can use a CLI fallback when the API fails and no cached quota is available.
+  * **Antigravity**: Direct cloud API queries without a running local IDE, showing Gemini 5-hour and weekly quotas plus Claude auxiliary quotas.
+  * **Cursor**: Total, Auto, and API quotas with Unlimited detection, plus today's and this week's remotely metered costs.
+  * **Command Code**: 5-hour and weekly quotas, plus monthly Credits for GOAT plans. Automatically detect credentials or store a manual API key in Keychain.
+* **Menu bar and floating HUD** — Choose services independently, with primary, weekly, or dual-window menu bar display. The HUD remembers its position, snaps to screen edges, and does not steal keyboard focus.
+* **Background refresh and service status** — Official service status and relative refresh times. Quota, log, and status tasks share a schedule, slow down while the screen is locked or asleep, pause during system sleep, and refresh on wake. Failed requests preserve cached data; 429 responses trigger backoff.
 
-### 💻 Pure Native Experience
-* **Zero-Config Onboarding** — Auto-detects existing local CLI and desktop sessions across all 5 services without re-entering or managing third-party API keys (also supports manual Keychain API key configuration for Command Code).
-* **Built-in & Dual Remote Pricing Engine** — Built-in catalog continually updated with latest models including Claude 5, GPT-5.6, DeepSeek, Cursor, and Command Code; automatically syncs and caches upstream LiteLLM and models.dev catalogs with graceful offline fallback.
-* **Privacy-First Local Parsing** — Safe string-only path splitting for protected directories (Desktop, Documents, Downloads, Music, Pictures, Movies), completely eliminating macOS TCC privacy permission dialogs; parses only tokens and model metadata without touching chat text; includes privacy mode (masks email and account names) and silent launch-at-login.
-* **Static Version Update Checker** — Checks updates against static GitHub Release manifests to eliminate GitHub API rate limits, with manual one-click checks in Settings.
+### 📊 Usage, Conversations, and Project Analytics
+
+* **Five local sources plus Cursor remote metering** — Read local sessions from Codex, Claude Code, Pi, OpenCode, and DSH (DeepSeek Harness). DSH supports JSONL and zstd-compressed logs. Cursor usage covers the account across devices through remote metering. Antigravity and Command Code provide quotas without separate usage analytics sources.
+* **Four analytics pages** — Overview, Conversations, and Projects share day / week / month granularity, time ranges, and custom dates:
+  * **Overview**: Total tokens, costs, per-service costs, and changes from the previous period; stacked usage charts, token breakdowns, and cache hit rate. Switch usage composition between service, provider, model, and project, or open a top conversation directly. A single-period selection expands the daily chart to 30 days, or weekly / monthly charts to 14 periods; totals still cover only the selected range.
+  * **Conversations**: Filter by service or project, search titles or projects, and sort by recent activity, tokens, or cost. Details cover the conversation's entire history: input, output, cache writes and reads, requests, cache hit rate, models, Standard / Fast tiers, and cost breakdowns.
+  * **Projects**: Tokens, costs, conversation counts, and active days by project, with daily trends, tools and models, branches, and top conversations. Recognized Git worktrees roll up into their main repository, with individual worktree details. Cursor remote usage, backfills, and early daily-only history appear separately as Unattributed.
+  * **Quota**: Current Codex and Claude Code 5-hour / weekly local usage, projected full-quota usage, estimated project breakdowns, and reset countdowns on one page. Quota history below shows today in the 5-hour view, or the current and previous cycles based on official reset times in the weekly view, with separate sections for each account.
+* **Cost estimates and pricing** — Local costs use recorded log costs or model-based estimates to compare consumption; they are not subscription bills. Cursor uses service-side metered costs. Pricing supports Codex Standard / Fast and long-context tiers, Claude cache TTLs and advisor usage. The built-in catalog includes GPT-6.1 Sol, Claude, DeepSeek, and Command Code model variants, supplemented by LiteLLM / models.dev. Price updates do not reprice history automatically; use Recalculate usage in Settings.
+* **History protection and verified recalculation** — Daily totals, conversations, cycle usage, and scan progress are saved together. A damaged current snapshot can fall back to the previous complete snapshot. Recalculation checks against preserved history first; incomplete reads, usage mismatches, or save failures retain the original data and display a warning. Incomplete results from cleaned-up source logs do not directly overwrite history.
+
+### 💻 Native Interface and Settings
+
+* **Services and accounts matrix** — Connection status and independent quota, menu bar, floating HUD, and analytics options in one table. Hiding a local analytics source preserves scanning and history so it remains available when re-enabled.
+* **Screenshot privacy mode** — Anonymize accounts, projects, and conversations; hide paths, branches, and IDs across analytics, the Popover, account settings, and related hints. Real costs, tokens, models, dates, and charts remain visible; original data is unchanged. Enable it in Settings → Appearance & Display → Privacy mode.
+* **Native macOS experience** — Light / dark appearance, Chinese / English, silent launch at login, keyboard refresh, and manual or startup checks for GitHub Release updates.
+* **Local diagnostics** — Logs rotate automatically and are redacted by default. Export a diagnostic bundle in Settings to inspect and share yourself; the app never uploads it automatically.
 
 ---
 
 ### 📸 Screenshots
 
 <p align="center">
-  <img src="docs/Screenshots/statistics-overview.png" width="720" alt="Usage Statistics - Overview"><br>
-  <sub><b>Usage Overview</b>: Token consumption and cost trends categorized by service and model</sub>
+  <img src="docs/Screenshots/statistics-overview.png" width="720" alt="Usage Overview"><br>
+  <sub><b>Usage Overview</b>: Tokens and costs by time range, with usage trends, cache hit rate, usage composition, and top conversations</sub>
 </p>
 
 <p align="center">
-  <img src="docs/Screenshots/statistics-conversations.png" width="720" alt="Usage Statistics - Conversations"><br>
-  <sub><b>Conversation Drilldown</b>: Per-session token breakdowns and cost analysis</sub>
+  <img src="docs/Screenshots/statistics-conversations.png" width="720" alt="Conversation Details"><br>
+  <sub><b>Conversation Details</b>: Search or filter conversations by project, then inspect token breakdowns, estimated costs, models, and speed tiers</sub>
 </p>
 
 <p align="center">
-  <img src="docs/Screenshots/statistics-timeline.png" width="720" alt="Usage Statistics - Timeline"><br>
-  <sub><b>Quota Timeline</b>: Historical quota burn rates within 5-hour reset windows</sub>
+  <img src="docs/Screenshots/statistics-projects.png" width="720" alt="Project Analytics"><br>
+  <sub><b>Project Analytics</b>: Usage and costs by project, with daily trends, tools and models, branches, and top conversations</sub>
+</p>
+
+<p align="center">
+  <img src="docs/Screenshots/statistics-quota.png" width="720" alt="Quota Monitoring"><br>
+  <sub><b>Quota Monitoring</b>: Current 5-hour and weekly usage for Codex and Claude Code, with estimated project breakdowns and quota change history</sub>
+</p>
+
+<p align="center">
+  <img src="docs/Screenshots/settings.png" width="720" alt="Services & Accounts"><br>
+  <sub><b>Services & Accounts</b>: Connection status, menu bar, floating HUD, and usage analytics options, plus additional Codex accounts</sub>
 </p>
 
 ---
@@ -105,7 +120,7 @@
 
 ## 🔒 Data and Privacy Security
 
-cc-bar strictly adheres to **local-first and least-privilege** principles. All usage metrics and quota queries are executed entirely on your machine:
+Usage logs are parsed and stored locally. Quotas, Cursor remote metering, service status, and pricing catalogs are fetched through their respective network APIs. The app does not upload local session logs or project data.
 
 ### Credential Reading & Refresh Policy
 
@@ -116,11 +131,12 @@ cc-bar strictly adheres to **local-first and least-privilege** principles. All u
 | **Antigravity** | `~/.gemini/jetski-standalone-oauth-token`<br>`~/.gemini/oauth_creds.json` (fallback) | Read / Write | Reads the standalone OAuth token first and refreshes near expiry. Cloud Mode queries Google Cloud APIs directly without requiring local IDE processes. |
 | **Cursor** | `~/Library/Application Support/Cursor`<br>`/User/globalStorage/state.vscdb` | **Strictly Read-Only** | Reads only `cursorAuth/accessToken` to construct session cookies for usage queries. Never touches refresh tokens/OAuth and never writes back to SQLite or Keychain. |
 | **Command Code** | 5-level local sources or macOS Keychain | Read / Keychain | Read-only auto-detection in order: `~/.commandcode/auth.json` → `~/.pi/agent/auth.json` → `~/.local/share/opencode/auth.json` → environment variables → Keychain. Settings can also switch to a manual API key stored in the macOS Keychain. |
-| **Local Session Logs** | `~/.codex/sessions`, `~/.claude/projects`<br>`~/.pi/agent/sessions`, OpenCode SQLite | **Strictly Read-Only** | Parses local JSONL / SQLite files for token metrics and model metadata only. Never reads or uploads conversation text. Safe path tokenization prevents permission prompts. |
+| **Local Session Logs** | `~/.codex/sessions`, `~/.claude/projects`<br>`~/.pi/agent/sessions`, OpenCode SQLite<br>`~/.dsh/sessions` | **Strictly Read-Only** | Parses usage, model, and project metadata, and reads title indexes or extracts conversation titles from logs. Missing titles may use a user-message excerpt. No conversation content is uploaded and source logs are never modified. |
 
 ### System Permissions & Zero-Telemetry Guarantee
 * **Zero Protected-Folder Access**: For protected directories (Desktop, Documents, Downloads, Music, Pictures, Movies) and for any path outside the home directory, project grouping relies exclusively on **in-memory string splitting**. It never invokes filesystem APIs on those paths, avoiding macOS privacy permission prompts.
 * **No Telemetry**: Contains zero tracking SDKs, analytics libraries, or external reporting services.
+* **Screenshot privacy and local data**: Privacy mode hides identities in the interface; real titles, paths, and statistics remain stored locally. Review screenshots before sharing, and check exported files and clipboard contents separately.
 * **Diagnostic Logs Stay Local**: Runtime logs live in `~/Library/Logs/CCBar/` (rotated, capped at roughly 8 MB) and are redacted by default — no sign-in tokens, plain-text email addresses, conversation content, file contents, or project names; accounts appear only as one-way hashes. Nothing is ever uploaded.
 
 > [!TIP]

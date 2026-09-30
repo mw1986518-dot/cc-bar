@@ -5,8 +5,8 @@
 <h1 align="center">cc-bar</h1>
 
 <p align="center">
-  <b>macOS 原生 AI 订阅额度监控与本地会话统计工具</b><br>
-  实时追踪 Codex、Claude Code、Antigravity、Cursor 与 Command Code 配额状态，精准分析本地会话 Token 与费用。
+  <b>macOS 原生 AI 额度监控与用量分析工具</b><br>
+  在菜单栏查看多服务剩余额度，按对话、项目和模型分析 Tokens、费用与缓存使用。
 </p>
 
 <p align="center">
@@ -29,55 +29,70 @@
 
 <p align="center">
   <img src="docs/Screenshots/popover-light.png" width="360" alt="Popover 总览 - 浅色模式">
-  <img src="docs/Screenshots/popover-dark.png" width="360" alt="Popover 总览 - 深色模式">
+  <img src="docs/Screenshots/popover-dark.png" width="360" alt="Popover 总览 - 深色模式"><br>
+  <sub>菜单栏、桌面悬浮窗与 Popover · 浅色 / 深色模式</sub>
 </p>
 
 ---
 
 ## ✨ 核心特性
 
-### ⚡ 多服务配额实时监控
-* **全平台客户端覆盖** — 原生支持 5 大 AI 编程助手的配额查询与健康感知：
-  * **Codex (OpenAI)**：5 小时主额度与周额度、重置倒计时；支持导入多个 Codex 账号同屏对比，展示额度到期时间与额外重置 Credits 次数。
-  * **Claude Code (Anthropic)**：5 小时与周额度，支持专项模型（如 Fable）周额度细分；API 异常或凭据过期时支持安全的 CLI 兜底刷新。
-  * **Antigravity (Google)**：Cloud Mode 直连云端 API（无需运行本地 IDE/CLI），权威分组展示 Gemini 5H 主额度、Gemini 周额度及 Claude 辅助额度。
-  * **Cursor**：直连官方 Usage API，展示 Total 主额度、Auto 及 API 次要额度，自动识别 Unlimited 并呈现 `∞` 标识，精确汇总今日与本周真实费用。
-  * **Command Code**：展示服务端返回的 5 小时主额度与周额度（上限与已用量均由接口给出），GOAT 套餐另附月度 Credits 额度（月总额 70）。
-* **常驻菜单栏与 HUD 悬浮** — 菜单栏动态展示所选服务百分比（支持主要/周/双窗口模式）；独立桌面悬浮窗支持分服务开关、20pt 边缘自动吸附、位置记忆且不抢占键盘输入焦点。
-* **实时可用性与智能调度** — Popover 动态滚动呈现最近刷新相对时间，内嵌 OpenAI、Anthropic 与 Cursor 官方服务健康状态点；后台额度（默认 2 分钟）、日志扫描（默认 5 分钟）与服务状态（固定 5 分钟）共用单一时基，到期任务合并唤醒，锁屏或息屏期间自动降频，系统睡眠时停表、唤醒后立即补刷；内置 60s 最小成功间隔与 429 后 10 分钟退避。
+### ⚡ 多服务额度监控
 
-### 📊 本地用量与全维费用透视
-* **跨引擎日志与远端计量聚合** — 自动解析本地 Codex（含 Standard/Fast 档位映射）、Claude Code（含 5m/1h 缓存 TTL 计价）、Pi（日志总价优先 + 价格表补齐）与 OpenCode（SQLite 库 `opencode.db`）会话记录，并接入 Cursor 全设备远端计量。
-* **四大专业分析视图**：
-  * **Overview（概览）**：统计粒度分日 / 周 / 月三档，时间范围随粒度切换（今天 / 本周 / 4 周 / 6 个月 / 全部 / 自定义等）；含总额与各服务 KPI 卡（带同期环比变化）、Token 拆分、按服务占比水平条、按粒度分桶的堆叠柱状图（单周期时自动扩展成近 14 个周期的上下文）、按模型与按提供商明细。
-  * **Conversations（对话明细）**：深入单次对话，展示四项 Token（输入/输出/缓存创建/缓存读取）、缓存命中率、速度档位（`Fast` / `Mixed` 徽标）与费用明细；无系统权限弹窗的安全智能项目归属识别。
-  * **Cycles（周期用量）**：按 Codex / Claude 主账号真实重置窗口统计当前 5H / 周周期的本机消耗（2×2 宽卡网格），基于官方比例测算耗尽预估与重置倒计时。
-  * **Timeline（额度时间线）**：5H 视图展示本地当天 00:00–24:00 的额度变动事件，周视图按服务返回的重置时刻划分当前与上一周期（不按自然周）；本机采样保留最近 15 天，多账号独立分区。
-* **厂商提供商归并（ModelProvider）** — 跨客户端将模型智能归并在 OpenAI、Anthropic、DeepSeek、OpenCode-Go、Command Code 与其他 6 大面板下，支持按费用/Tokens/请求数/名称排序并就地展开 Token 拆分。
+* **五种额度服务** — 支持 Codex、Claude Code、Antigravity、Cursor 和 Command Code：
+  * **Codex**：5 小时与周额度、重置倒计时；支持粘贴 `auth.json` 导入多个账号同屏查看，查看额度到期时间及可用的额外重置次数，不切换 CLI 登录状态。
+  * **Claude Code**：5 小时、周额度与模型专项额度；API 失败且无可展示缓存时，手动刷新可使用 CLI 兜底。
+  * **Antigravity**：直接查询云端 API，无需运行本地 IDE；展示 Gemini 5 小时、周额度及 Claude 辅助额度。
+  * **Cursor**：展示 Total、Auto 与 API 额度，识别 Unlimited，并汇总今日与本周的远端计量费用。
+  * **Command Code**：展示 5 小时与周额度，GOAT 套餐附月度 Credits；支持自动探测凭据或在 Keychain 中保存手动 API Key。
+* **菜单栏与桌面悬浮窗** — 分服务选择显示内容，菜单栏支持主要 / 周 / 双窗口模式；悬浮窗支持边缘吸附、位置记忆，不抢占键盘焦点。
+* **后台刷新与服务状态** — 展示官方服务状态和最近刷新时间；额度、日志与服务状态任务合并调度，锁屏或息屏时降频，睡眠时暂停、唤醒后补刷。网络失败保留已有快照，429 后遵守退避。
 
-### 💻 纯净高效的原生体验
-* **零配置自动识别** — 自动扫描本机既有登录态，涵盖 5 大服务的本地凭据，无需重复输入或保存任何第三方 API Key（亦支持 Command Code Keychain 手动配置）。
-* **内置与双层在线价格引擎** — 内置价格表持续收录 Claude 5、GPT-5.6、DeepSeek、Cursor、Command Code 等最新模型；自动拉取 LiteLLM 与 models.dev 远端目录增量补齐，离线自动降级。
-* **纯本地解析与注重隐私** — 对桌面、文稿、下载、音乐、图片、影片等受保护目录只做纯文本路径分词，零 macOS TCC 权限弹窗；会话仅提取 Token 与模型元数据，绝不读取聊天文本；支持隐私模式（隐藏邮箱/副账号名）与静默开机自启。
-* **静态版本更新检测** — 基于 GitHub Release 静态版本清单检查更新，支持设置页手动一键检查，避免 GitHub API 速率限制。
+### 📊 用量、对话与项目分析
+
+* **五种本地数据源与 Cursor 远端计量** — 读取 Codex、Claude Code、Pi、OpenCode 和 DSH（DeepSeek Harness）的本机会话记录；DSH 支持 JSONL 与 zstd 压缩日志。Cursor 用量来自账号全设备远端计量。Antigravity 与 Command Code 提供额度展示，不作为独立用量统计来源。
+* **四个统计页面** — 概览、对话与项目共享日 / 周 / 月粒度、时间范围及自定义日期：
+  * **概览**：总 Tokens、费用、各服务费用与同期变化；堆叠用量图、Token 拆分与缓存命中率。用量构成可按服务、提供商、模型或项目切换，高消耗对话可直接跳转到详情。选择单个周期时，日图扩展为近 30 天，周 / 月图扩展为近 14 个周期，汇总仍只统计所选范围。
+  * **对话**：按服务、项目筛选，搜索标题或项目，按最近活动、Tokens 或费用排序。详情展示对话全部时间的输入、输出、缓存写入与读取、请求数、缓存命中率、模型构成，以及 Standard / Fast 档位和费用拆分。
+  * **项目**：按项目汇总 Tokens、费用、对话数与活跃天数，查看每日趋势、工具与模型、分支和高消耗对话；可识别的 Git worktree 自动归入主仓库，并展示各 worktree 的明细。Cursor 远端计量、补录与早期按天汇总历史单列为「未归属」。
+  * **额度**：在同一页查看 Codex 与 Claude Code 当前 5 小时 / 周周期的本机用量、用满预估、按项目拆分的估算和重置倒计时。下方展示额度变化：5 小时视图看今天，周视图按官方重置时刻展示当前与上一额度周期；多账号独立展示。
+* **费用口径与定价** — 本地费用按日志记录或模型价格估算，用于比较消耗，不等同于订阅账单；Cursor 使用服务端计量费用。支持 Codex Standard / Fast、长上下文阶梯、Claude 缓存 TTL 与 advisor 用量；内置价格表包含 GPT-6.1 Sol、Claude、DeepSeek 及 Command Code 的模型变体，并通过 LiteLLM / models.dev 补齐。价格更新不会自动重算历史，需在设置中手动「重新计算用量」。
+* **历史保护与安全重算** — 日统计、对话、周期用量及扫描进度统一保存，当前快照损坏时尝试恢复上一份完整快照。手动重算先核对原历史，读取不完整、用量不一致或保存失败时保留原数据并提示；源日志已清理时也不会直接用不完整结果覆盖历史。
+
+### 💻 原生界面与设置
+
+* **服务与账号矩阵** — 在一张表里查看连接状态，分别配置额度服务、菜单栏、悬浮窗与用量统计；关闭本地统计展示后仍保留扫描和历史，重新开启可继续查看。
+* **截图隐私模式** — 匿名显示账号、项目与对话，遮挡路径、分支和 ID，覆盖统计页、Popover、账号设置及相关提示；保留真实金额、Tokens、模型、时间与图表，不修改原始数据。入口为「设置 → 外观与显示 → 隐私模式」。
+* **macOS 原生体验** — 支持浅色 / 深色外观、中文 / English、静默开机自启、快捷键刷新，以及手动或启动时检查 GitHub Release 更新。
+* **本地诊断** — 日志自动轮转并默认脱敏；可在设置中导出诊断包，由用户自行检查和分享，应用不会自动上传。
 
 ---
 
 ### 📸 界面预览
 
 <p align="center">
-  <img src="docs/Screenshots/statistics-overview.png" width="720" alt="用量统计 - 概览"><br>
-  <sub><b>用量概览</b>：按服务与模型分类汇总 Token 消耗与费用走势</sub>
+  <img src="docs/Screenshots/statistics-overview.png" width="720" alt="用量概览"><br>
+  <sub><b>用量概览</b>：按时间范围汇总 Tokens 与费用，查看用量趋势、缓存命中率、用量构成和高消耗对话</sub>
 </p>
 
 <p align="center">
-  <img src="docs/Screenshots/statistics-conversations.png" width="720" alt="用量统计 - 对话"><br>
-  <sub><b>会话明细</b>：下钻至单次对话的 Token 明细与成本分析</sub>
+  <img src="docs/Screenshots/statistics-conversations.png" width="720" alt="对话明细"><br>
+  <sub><b>对话明细</b>：按项目筛选或搜索对话，查看单次对话的 Token 构成、估算费用、模型与速度档位</sub>
 </p>
 
 <p align="center">
-  <img src="docs/Screenshots/statistics-timeline.png" width="720" alt="用量统计 - 时间线"><br>
-  <sub><b>额度时间线</b>：5 小时重置窗口内的额度消耗历史走势</sub>
+  <img src="docs/Screenshots/statistics-projects.png" width="720" alt="项目分析"><br>
+  <sub><b>项目分析</b>：按项目查看用量与费用，分析每日趋势、工具与模型、分支和高消耗对话</sub>
+</p>
+
+<p align="center">
+  <img src="docs/Screenshots/statistics-quota.png" width="720" alt="额度监控"><br>
+  <sub><b>额度监控</b>：查看 Codex 与 Claude Code 当前 5 小时和周周期用量、按项目拆分的估算及额度变化记录</sub>
+</p>
+
+<p align="center">
+  <img src="docs/Screenshots/settings.png" width="720" alt="服务与账号设置"><br>
+  <sub><b>服务与账号设置</b>：查看服务连接状态，配置菜单栏、悬浮窗与用量统计，并添加其他 Codex 账号</sub>
 </p>
 
 ---
@@ -105,7 +120,7 @@
 
 ## 🔒 数据与隐私安全
 
-cc-bar 严格遵循**本地优先与最小权限**原则，所有用量统计与额度查询均在本地完成：
+用量日志在本机解析与保存；额度、Cursor 远端计量、服务状态及价格目录通过对应服务的网络接口查询。应用不上传本机会话日志或项目数据。
 
 ### 凭据读取与刷新策略
 
@@ -116,11 +131,12 @@ cc-bar 严格遵循**本地优先与最小权限**原则，所有用量统计与
 | **Antigravity** | `~/.gemini/jetski-standalone-oauth-token`<br>`~/.gemini/oauth_creds.json` (兜底) | 读 / 写 | 优先读取独立 OAuth Token，临期自动续期回写。Cloud Mode 直连 Google 云端 API，无需本地 IDE 运行。 |
 | **Cursor** | `~/Library/Application Support/Cursor`<br>`/User/globalStorage/state.vscdb` | **严格只读** | 仅读 `cursorAuth/accessToken` 构造 Cookie 查询用量，绝不碰 refresh token/OAuth，不写回 Cursor SQLite 或 Keychain。 |
 | **Command Code** | 5 级本地来源或 macOS Keychain | 读 / Keychain | 只读自动探测按 `~/.commandcode/auth.json` → `~/.pi/agent/auth.json` → `~/.local/share/opencode/auth.json` → 环境变量 → Keychain 依次尝试；也可在设置中切换为手动 API Key，由 macOS Keychain 保存。 |
-| **本地会话日志** | `~/.codex/sessions`、`~/.claude/projects`<br>`~/.pi/agent/sessions`、OpenCode SQLite | **严格只读** | 仅扫描本地 JSONL/SQLite 解析 Token 用量与模型元数据，绝不收集或上传聊天正文。受保护目录做纯文本路径分词，零权限弹窗。 |
+| **本地会话日志** | `~/.codex/sessions`、`~/.claude/projects`<br>`~/.pi/agent/sessions`、OpenCode SQLite<br>`~/.dsh/sessions` | **严格只读** | 解析用量、模型及项目元数据，读取标题索引或从日志提取对话标题；标题缺失时可能使用用户消息摘要。不上传会话内容，不改写源日志。 |
 
 ### 系统权限与零遥测承诺
 * **无受保护文件夹访问**：对桌面、文稿、下载、音乐、图片、影片等受保护目录，以及家目录以外的路径，项目归组仅做**纯文本路径分词**，绝不调用文件系统接口，因此**不会触发系统的隐私权限弹窗**。
 * **零外部遥测**：全应用不包含任何统计上报或第三方 SDK，不发送任何用户行为遥测。
+* **截图隐私与本地数据**：隐私模式只隐藏界面中的身份信息，真实标题、路径与统计仍保存在本机；分享截图前可检查画面，导出文件和剪贴板需自行确认。
 * **诊断日志只在本机**：运行日志写在 `~/Library/Logs/CCBar/`（约 8 MB 上限，自动轮转），默认脱敏——不含登录令牌、明文邮箱、对话内容、文件内容或项目名，账号只以单向哈希出现。App 不会上传任何日志。
 
 > [!TIP]
