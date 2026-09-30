@@ -282,6 +282,8 @@ nonisolated struct ConversationOverviewRequest: Sendable, Hashable {
     /// 可见服务 ∩ 侧栏服务筛选。
     var apps: Set<UsageApp>
     var topConversationLimit: Int
+    /// 项目行与高消耗对话的排序口径；界面按设置传入，未指定时按费用。
+    var metric: StatsRankMetric = .cost
 }
 
 nonisolated struct ProjectUsageRow: Sendable, Equatable, Identifiable {
@@ -307,6 +309,11 @@ nonisolated struct TopConversationRow: Sendable, Equatable, Identifiable {
     var summary: ConversationSummary
     var project: StatsProjectIdentity
     var id: String { summary.id }
+
+    /// 该对话在排行口径下的数值（费用取 `costs.total`，与排序一致）。
+    func rankValue(_ metric: StatsRankMetric) -> Decimal {
+        metric.value(tokens: summary.totals.totalTokens, cost: summary.costs.total)
+    }
 }
 
 nonisolated struct UsageDayAppKey: Sendable, Hashable {
@@ -315,13 +322,13 @@ nonisolated struct UsageDayAppKey: Sendable, Hashable {
 }
 
 nonisolated struct ConversationOverviewResult: Sendable {
-    /// 按 API 等值降序、同值按名称升序；包括无明确项目与系统任务。
+    /// 按请求口径降序、同值按名称升序；无明确项目与系统任务在最后。
     var projects: [ProjectUsageRow]
     /// 能归属到任何对话档案的用量，按服务合计；未归属 = 概览合计 − 这里。
     var attributedByApp: [UsageApp: UsageTotals]
     /// 同上，按 (天, 服务)；未归属详情画每日图时用。
     var attributedByDayApp: [UsageDayAppKey: UsageTotals]
-    /// 按 API 等值取前 N 个对话。
+    /// 按请求口径取前 N 个对话。
     var topConversations: [TopConversationRow]
 
     static let empty = ConversationOverviewResult(
@@ -340,6 +347,8 @@ nonisolated struct ProjectDetailRequest: Sendable, Hashable {
     /// 上一个等长区间；nil 时不计算 delta。
     var previous: Range<Date>?
     var apps: Set<UsageApp>
+    /// 模型、分支、worktree 与高消耗对话的排序口径；界面按设置传入，未指定时按费用。
+    var metric: StatsRankMetric = .cost
 }
 
 nonisolated struct ProjectModelUsage: Sendable, Equatable, Identifiable {

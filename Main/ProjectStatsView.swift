@@ -3,10 +3,18 @@ import Charts
 import SwiftUI
 
 /// 项目列表排序：API 等值 / Tokens / 最近活跃。特殊项目（无明确项目、系统任务）始终排在末尾。
+/// 默认值跟随设置里的排行口径，菜单切换只作用于本次查看、不持久化。
 enum ProjectListSort: Hashable, CaseIterable {
     case cost
     case tokens
     case recent
+
+    init(_ metric: StatsRankMetric) {
+        switch metric {
+        case .tokens: self = .tokens
+        case .cost: self = .cost
+        }
+    }
 
     @MainActor
     var label: String {
@@ -76,6 +84,7 @@ final class ProjectPageCache {
         let from: Date
         let to: Date
         let apps: Set<UsageApp>
+        let metric: StatsRankMetric
     }
 
     struct Output {
@@ -109,7 +118,7 @@ struct ProjectStatsView: View {
     let showServiceInOverview: (UsageApp) -> Void
 
     @State private var search = ""
-    @State private var sort: ProjectListSort = .cost
+    @State private var sort = ProjectListSort(SettingsStore.shared.statsRankMetric)
     @State private var selection: String?
     @State private var cache = ProjectPageCache()
 
@@ -146,6 +155,16 @@ struct ProjectStatsView: View {
         }
         .onChange(of: navigation) { _, _ in applyNavigation() }
         .onChange(of: rows.map(\.key)) { _, _ in reconcileSelection(rows: rows) }
+        .onChange(of: SettingsStore.shared.statsRankMetric) { _, metric in sort = ProjectListSort(metric) }
+    }
+
+    /// 列表行大号数字与工具构成细条的口径：按 Tokens / 费用排序时跟随排序，按最近活跃时跟随设置。
+    private var listMetric: StatsRankMetric {
+        switch sort {
+        case .tokens: return .tokens
+        case .cost: return .cost
+        case .recent: return SettingsStore.shared.statsRankMetric
+        }
     }
 
     private func filterRow(projectCount: Int) -> some View {
@@ -182,16 +201,18 @@ struct ProjectStatsView: View {
                     description: Text(tr("Try another keyword.", "请换一个关键词。"))
                 )
             } else {
-                let maxCost = rows.first(where: { !$0.isSpecial })?.totals.costUSD ?? rows.first?.totals.costUSD ?? 0
+                let metric = listMetric
+                // 细条按口径最大值归一：按最近活跃排序时第一行不一定最大。
+                let maxValue = rows.filter { !$0.isSpecial }.map { metric.value($0.totals) }.max()
+                    ?? rows.map { metric.value($0.totals) }.max() ?? 0
                 StatsSelectionList(items: rows, selection: $selection) { row in
                     ProjectListRow(
                         row: row,
                         isGitRepository: row.status == .available
                             ? appState.usageService.conversationAggregator.isGitRepository(row.path)
                             : nil,
-                        widthRatio: maxCost > 0
-                            ? NSDecimalNumber(decimal: row.totals.costUSD / maxCost).doubleValue
-                            : 0
+                        widthRatio: StatsRankMetric.ratio(metric.value(row.totals), to: maxValue),
+                        metric: metric
                     )
                 }
             }
@@ -251,6 +272,7 @@ struct ProjectStatsView: View {
                 rangeLabel: tr(range.englishLabel, range.chineseLabel),
                 rangeDayCount: rangeDayCount(firstUsedDay: detail.firstUsedDay),
                 granularity: granularity,
+                metric: SettingsStore.shared.statsRankMetric,
                 navigate: navigate
             )
         } else {
@@ -279,12 +301,14 @@ struct ProjectStatsView: View {
         let conversations = appState.usageService.conversationAggregator
         let bounds = self.bounds
         let apps = selectedApps
+        let metric = SettingsStore.shared.statsRankMetric
         let input = ProjectPageCache.Input(
             usageRevision: aggregator.revision,
             conversationRevision: conversations.revision,
             from: bounds.from,
             to: bounds.to,
-            apps: apps
+            apps: apps,
+            metric: metric
         )
         return cache.output(for: input) {
             // 与概览使用相同的请求（前 5 个对话），两个视图切换时命中同一份缓存。
@@ -293,7 +317,8 @@ struct ProjectStatsView: View {
                 from: bounds.from,
                 to: bounds.to,
                 apps: apps,
-                topConversationLimit: 5
+                topConversationLimit: 5,
+                metric: metric
             ))
             let unattributed = UnattributedBreakdown.build(
                 buckets: aggregator.snapshot(),
@@ -315,7 +340,8 @@ struct ProjectStatsView: View {
             from: bounds.from,
             to: bounds.to,
             previous: previous.map { $0.from..<$0.to },
-            apps: selectedApps
+            apps: selectedApps,
+            metric: SettingsStore.shared.statsRankMetric
         ))
     }
 
@@ -366,7 +392,7 @@ struct ProjectStatsView: View {
             selection = Self.unattributedSelection
         case .projectsList:
             search = ""
-        case .conversation, .conversationsByCost, .conversationsInProject:
+        case .conversation, .conversationsByRank, .conversationsInProject:
             return
         }
         navigation = nil
@@ -387,6 +413,8 @@ private struct ProjectListRow: View {
     let isGitRepository: Bool?
     /// 相对第一名的宽度比例，工具构成细条据此缩放。
     let widthRatio: Double
+    /// 大号数字与细条分段的口径，另一项降为次级。
+    let metric: StatsRankMetric
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -399,7 +427,7 @@ private struct ProjectListRow: View {
                     ProjectBadge(text: badge)
                 }
                 Spacer(minLength: 6)
-                Text(StatsFormatter.cost(row.totals.costUSD))
+                Text(metric == .tokens ? StatsFormatter.compactToken(row.totals.totalTokens) : StatsFormatter.cost(row.totals.costUSD))
                     .font(.system(size: 12.5, weight: .semibold))
                     .monospacedDigit()
             }
@@ -410,12 +438,12 @@ private struct ProjectListRow: View {
                     .lineLimit(1)
                     .truncationMode(.head)
                 Spacer(minLength: 6)
-                Text("\(StatsFormatter.compactToken(row.totals.totalTokens)) Tokens · \(StatsRelativeDay.text(row.lastAt))")
+                Text("\(metric == .tokens ? StatsFormatter.cost(row.totals.costUSD) : "\(StatsFormatter.compactToken(row.totals.totalTokens)) Tokens") · \(StatsRelativeDay.text(row.lastAt))")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
-            ServiceMixBar(totalsByApp: row.totalsByApp, widthRatio: widthRatio)
+            ServiceMixBar(totalsByApp: row.totalsByApp, widthRatio: widthRatio, metric: metric)
         }
     }
 
@@ -464,6 +492,7 @@ private struct ProjectBadge: View {
 private struct ServiceMixBar: View {
     let totalsByApp: [UsageApp: UsageTotals]
     let widthRatio: Double
+    let metric: StatsRankMetric
 
     var body: some View {
         GeometryReader { proxy in
@@ -486,7 +515,7 @@ private struct ServiceMixBar: View {
     }
 
     private var usesCost: Bool {
-        totalsByApp.values.contains { $0.costUSD > 0 }
+        metric == .cost && totalsByApp.values.contains { $0.costUSD > 0 }
     }
 
     private func weight(_ totals: UsageTotals) -> Double {
@@ -542,6 +571,8 @@ private struct ProjectDetailView: View {
     let rangeLabel: String
     let rangeDayCount: Int
     let granularity: StatsGranularity
+    /// 排行口径：工具占比、模型行大号数字与高消耗对话跟随它（排序已由 `ProjectDetailRequest` 完成）。
+    let metric: StatsRankMetric
     let navigate: (StatsNavigationRequest.Target) -> Void
 
     /// 卡片高度只由固定行数决定、不随项目内容变化，切换项目时各卡片不跳：
@@ -691,12 +722,6 @@ private struct ProjectDetailView: View {
 
     private var toolsAndModels: some View {
         let apps = UsageApp.allCases.filter { detail.totalsByApp[$0]?.hasUsage == true }
-        let usesCost = detail.totals.costUSD > 0
-        func share(_ totals: UsageTotals) -> Double {
-            if usesCost { return NSDecimalNumber(decimal: totals.costUSD / detail.totals.costUSD).doubleValue }
-            guard detail.totals.totalTokens > 0 else { return 0 }
-            return Double(totals.totalTokens) / Double(detail.totals.totalTokens)
-        }
         // 最多 5 行：超过 5 个模型时列前 4 个，第 5 行为「其余 N 个模型」。
         let limit = detail.models.count > Self.modelSlots ? Self.modelSlots - 1 : Self.modelSlots
         let models = Array(detail.models.prefix(limit))
@@ -729,24 +754,24 @@ private struct ProjectDetailView: View {
                             .truncationMode(.middle)
                             .layoutPriority(1)
                         Spacer(minLength: 6)
-                        Text("\(StatsFormatter.compactToken(model.totals.totalTokens))")
+                        Text(metric == .tokens ? StatsFormatter.cost(model.totals.costUSD) : StatsFormatter.compactToken(model.totals.totalTokens))
                             .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
-                        Text(StatsFormatter.cost(model.totals.costUSD))
+                        Text(metric == .tokens ? StatsFormatter.compactToken(model.totals.totalTokens) : StatsFormatter.cost(model.totals.costUSD))
                             .font(.system(size: 11.5, weight: .semibold))
                             .monospacedDigit()
                             .frame(width: 76, alignment: .trailing)
                     }
                 }
                 if !restModels.isEmpty {
-                    let restCost = restModels.reduce(Decimal(0)) { $0 + $1.totals.costUSD }
+                    let restTotals = restModels.reduce(into: UsageTotals.zero) { $0.add($1.totals) }
                     HStack {
                         Text(tr("\(restModels.count) other models", "其余 \(restModels.count) 个模型"))
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Text(StatsFormatter.cost(restCost))
+                        Text(metric == .tokens ? StatsFormatter.compactToken(restTotals.totalTokens) : StatsFormatter.cost(restTotals.costUSD))
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
@@ -824,12 +849,9 @@ private struct ProjectDetailView: View {
                     index: index,
                     row: row,
                     share: share(row.summary.totals),
-                    barRatio: rows.first.map { first in
-                        first.summary.costs.total > 0
-                            ? NSDecimalNumber(decimal: row.summary.costs.total / first.summary.costs.total).doubleValue
-                            : 0
-                    } ?? 0,
-                    showsProject: false
+                    barRatio: rows.first.map { StatsRankMetric.ratio(row.rankValue(metric), to: $0.rankValue(metric)) } ?? 0,
+                    showsProject: false,
+                    metric: metric
                 ) {
                     navigate(.conversation(row.id))
                 }
@@ -857,11 +879,7 @@ private struct ProjectDetailView: View {
     }
 
     private func share(_ totals: UsageTotals) -> Double {
-        if detail.totals.costUSD > 0 {
-            return NSDecimalNumber(decimal: totals.costUSD / detail.totals.costUSD).doubleValue
-        }
-        guard detail.totals.totalTokens > 0 else { return 0 }
-        return Double(totals.totalTokens) / Double(detail.totals.totalTokens)
+        metric.share(of: totals, in: detail.totals)
     }
 
     private var worktreeTable: some View {

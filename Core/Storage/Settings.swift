@@ -212,6 +212,9 @@ final class SettingsStore {
     var usageInterval: UsageIntervalChoice { didSet { defaults.set(usageInterval.rawValue, forKey: Keys.usageInterval) } }
     var resetTimeDisplay: ResetTimeDisplay { didSet { defaults.set(resetTimeDisplay.rawValue, forKey: Keys.resetTimeDisplay) } }
 
+    /// 统计页排行口径（默认 Tokens），见 `StatsRankMetric`。
+    var statsRankMetric: StatsRankMetric { didSet { defaults.set(statsRankMetric.rawValue, forKey: Keys.statsRankMetric) } }
+
     /// 是否在 Popover 中显示 OpenAI / Anthropic 服务状态圆点
     var showServiceStatus: Bool { didSet { defaults.set(showServiceStatus, forKey: Keys.showServiceStatus) } }
 
@@ -265,6 +268,8 @@ final class SettingsStore {
         usageInterval = UsageIntervalChoice(rawValue: uiRaw) ?? .m5
         let rtdRaw = defaults.string(forKey: Keys.resetTimeDisplay) ?? ResetTimeDisplay.relative.rawValue
         resetTimeDisplay = ResetTimeDisplay(rawValue: rtdRaw) ?? .relative
+        let srmRaw = defaults.string(forKey: Keys.statsRankMetric) ?? StatsRankMetric.tokens.rawValue
+        statsRankMetric = StatsRankMetric(rawValue: srmRaw) ?? .tokens
         showServiceStatus = defaults.object(forKey: Keys.showServiceStatus) as? Bool ?? true
         // 通用：launchAtLogin 以系统当前注册状态为准
         let langRaw = defaults.string(forKey: Keys.appLanguage) ?? AppLanguage.system.rawValue
@@ -515,6 +520,7 @@ final class SettingsStore {
         static let quotaInterval = "ccbar.settings.quotaInterval"
         static let usageInterval = "ccbar.settings.usageInterval"
         static let resetTimeDisplay = "ccbar.settings.resetTimeDisplay"
+        static let statsRankMetric = "ccbar.settings.statsRankMetric"
         static let showServiceStatus = "ccbar.settings.showServiceStatus"
         static let launchAtLogin = "ccbar.settings.launchAtLogin"
         static let appLanguage = "ccbar.settings.appLanguage"

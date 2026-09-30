@@ -378,6 +378,29 @@ struct SettingsRootView: View {
                     .tint(.green)
             }
         }
+
+        PrefsGroup(
+            title: "Statistics",
+            chinese: "统计"
+        ) {
+            PrefsRow(
+                label: "Ranking metric",
+                chinese: "排行口径",
+                desc: "How usage composition, top conversations, and project details are sorted and shared. Also the default sort of the project list.",
+                chineseDesc: "概览用量构成、高消耗对话与详情列表按此排序并计算占比，也是项目列表的默认排序"
+            ) {
+                Picker("", selection: Binding(
+                    get: { settings.statsRankMetric },
+                    set: { settings.statsRankMetric = $0 }
+                )) {
+                    Text("Tokens").tag(StatsRankMetric.tokens)
+                    Text(tr("Cost", "费用")).tag(StatsRankMetric.cost)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+            }
+        }
     }
 
     // MARK: - Section 3: Data & Refresh

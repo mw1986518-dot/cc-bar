@@ -36,6 +36,8 @@ struct StatsOverviewInput: Equatable {
     /// `ConversationAggregator.revision`：项目构成与高消耗对话来自对话聚合，
     /// 它变化时也要重新派生。
     var conversationRevision: UInt64 = 0
+    /// 排行口径（设置项）：构成、模型明细的排序与占比，高消耗对话的排序与金额条。
+    var rankMetric: StatsRankMetric = .cost
 }
 
 // MARK: - Model
@@ -56,13 +58,14 @@ struct StatsOverviewModel {
     /// 固定柱宽：周期很少时避免柱子被自动撑满绘图区，周期多时调窄。
     let barWidth: CGFloat
     let highlightedPeriodStart: Date?
+    let rankMetric: StatsRankMetric
     /// 未排序的提供商分组，见 `ProviderGroup.sorted(_:by:)`。
     let providerGroups: [ProviderGroup]
-    /// 「用量构成」四个维度的行，已按 API 等值排序并做好合并。
+    /// 「用量构成」四个维度的行，已按排行口径排序。
     let composition: [CompositionDimension: [CompositionRow]]
     /// 概览总量里无法归属到项目的部分（Cursor 远端、补录、早期历史等）。
     let unattributed: UsageTotals
-    /// 按 API 等值取前 5 的对话。
+    /// 按排行口径取前 5 的对话。
     let topConversations: [TopConversationRow]
 
     private let totalsByApp: [UsageApp: UsageTotals]
@@ -84,7 +87,7 @@ struct StatsOverviewModel {
         speedByApp[app] ?? UsageSpeedBreakdown()
     }
 
-    /// 某服务的按模型明细，按费用降序、同值按模型名升序。
+    /// 某服务的按模型明细，按排行口径降序、同值按模型名升序。
     func modelRows(_ app: UsageApp) -> [ModelRow] {
         modelRowsByApp[app] ?? []
     }
@@ -94,23 +97,19 @@ struct StatsOverviewModel {
         samples.first { $0.key == key }
     }
 
-    /// 占比口径：有金额时按 API 等值，全部无价时退回按 Tokens。
-    var sharesUseCost: Bool { totalsAll.costUSD > 0 }
-
-    /// 某行在当前合计里的占比，0~1。
+    /// 某行在当前合计里的占比，0~1；口径同 `rankMetric`。
     func share(of totals: UsageTotals) -> Double {
-        if sharesUseCost {
-            return NSDecimalNumber(decimal: totals.costUSD / totalsAll.costUSD).doubleValue
-        }
-        guard totalsAll.totalTokens > 0 else { return 0 }
-        return Double(totals.totalTokens) / Double(totalsAll.totalTokens)
+        rankMetric.share(of: totals, in: totalsAll)
     }
 
-    /// 前 N 个高消耗对话合计占概览 API 等值的比例；概览无金额时为 nil。
-    var topConversationsCostShare: Double? {
-        guard totalsAll.costUSD > 0, !topConversations.isEmpty else { return nil }
-        let sum = topConversations.reduce(Decimal(0)) { $0 + $1.summary.costs.total }
-        return min(1, NSDecimalNumber(decimal: sum / totalsAll.costUSD).doubleValue)
+    /// 前 N 个高消耗对话合计占概览的比例，口径同 `rankMetric`；合计为 0 时为 nil。
+    var topConversationsShare: Double? {
+        let total = rankMetric.value(totalsAll)
+        guard total > 0, !topConversations.isEmpty else { return nil }
+        let sum = topConversations.reduce(Decimal(0)) {
+            $0 + rankMetric.value(tokens: $1.summary.totals.totalTokens, cost: $1.summary.costs.total)
+        }
+        return min(1, NSDecimalNumber(decimal: sum / total).doubleValue)
     }
 
     static func build(
@@ -179,14 +178,15 @@ struct StatsOverviewModel {
             groupsByProvider[provider, default: ProviderGroup(provider: provider)].add(bucket)
         }
 
+        let metric = input.rankMetric
         let modelRowsByApp = modelsByApp.mapValues { byModel in
             byModel
                 .map { ModelRow(model: $0.key, totals: $0.value.totals, speed: $0.value.speed) }
                 .sorted {
-                    if $0.totals.costUSD == $1.totals.costUSD {
-                        return $0.model < $1.model
-                    }
-                    return $0.totals.costUSD > $1.totals.costUSD
+                    let l = metric.value($0.totals)
+                    let r = metric.value($1.totals)
+                    if l == r { return $0.model < $1.model }
+                    return l > r
                 }
         }
 
@@ -203,9 +203,9 @@ struct StatsOverviewModel {
         }
         let serviceApps = input.visibleApps.filter { serviceApp == nil || $0 == serviceApp }
         let composition: [CompositionDimension: [CompositionRow]] = [
-            .service: CompositionBuilder.serviceRows(apps: serviceApps, totals: totalsByApp, speed: speedByApp),
-            .provider: CompositionBuilder.providerRows(providerGroups),
-            .model: CompositionBuilder.modelRows(modelsByApp),
+            .service: CompositionBuilder.serviceRows(apps: serviceApps, totals: totalsByApp, speed: speedByApp, metric: metric),
+            .provider: CompositionBuilder.providerRows(providerGroups, metric: metric),
+            .model: CompositionBuilder.modelRows(modelsByApp, metric: metric),
             .project: CompositionBuilder.projectRows(conversationOverview.projects, unattributed: unattributed)
         ]
 
@@ -218,6 +218,7 @@ struct StatsOverviewModel {
             samples: samples,
             barWidth: barWidth(forSampleCount: samples.count),
             highlightedPeriodStart: input.highlightedPeriodStart,
+            rankMetric: metric,
             providerGroups: providerGroups,
             composition: composition,
             unattributed: unattributed,
@@ -253,6 +254,25 @@ struct StatsOverviewModel {
     private struct ProviderModelKey: Hashable {
         let app: UsageApp
         let model: String
+    }
+}
+
+// MARK: - Rank metric
+
+extension StatsRankMetric {
+    /// `part` 占 `total` 的比例，0~1。按费用但合计无金额（全部无价）时退回按 Tokens。
+    func share(of part: UsageTotals, in total: UsageTotals) -> Double {
+        if self == .cost, total.costUSD > 0 {
+            return NSDecimalNumber(decimal: part.costUSD / total.costUSD).doubleValue
+        }
+        guard total.totalTokens > 0 else { return 0 }
+        return Double(part.totalTokens) / Double(total.totalTokens)
+    }
+
+    /// 条长比例：`value / reference`，reference 为 0 时为 0。调用方用 `value(...)` 取同一口径的两个值。
+    static func ratio(_ value: Decimal, to reference: Decimal) -> Double {
+        guard reference > 0 else { return 0 }
+        return NSDecimalNumber(decimal: value / reference).doubleValue
     }
 }
 
@@ -339,18 +359,19 @@ struct CompositionRow: Identifiable {
 }
 
 /// 四个维度都全部列出、不合并（需求 §3.1），行多时由视图在列表区内滚动。
-/// 都按 API 等值降序，同值按名称；「其他」提供商、特殊项目与未归属不参与排名，固定在最后。
+/// 都按排行口径降序，同值按名称；「其他」提供商、特殊项目与未归属不参与排名，固定在最后。
 enum CompositionBuilder {
     static func serviceRows(
         apps: [UsageApp],
         totals: [UsageApp: UsageTotals],
-        speed: [UsageApp: UsageSpeedBreakdown]
+        speed: [UsageApp: UsageSpeedBreakdown],
+        metric: StatsRankMetric = .cost
     ) -> [CompositionRow] {
         let order = Dictionary(uniqueKeysWithValues: apps.enumerated().map { ($1, $0) })
         return apps
             .sorted { lhs, rhs in
-                let l = totals[lhs]?.costUSD ?? 0
-                let r = totals[rhs]?.costUSD ?? 0
+                let l = metric.value(totals[lhs] ?? .zero)
+                let r = metric.value(totals[rhs] ?? .zero)
                 if l == r { return (order[lhs] ?? 0) < (order[rhs] ?? 0) }
                 return l > r
             }
@@ -369,8 +390,8 @@ enum CompositionBuilder {
             }
     }
 
-    static func providerRows(_ groups: [ProviderGroup]) -> [CompositionRow] {
-        let sorted = ProviderGroup.sorted(groups, by: .cost)
+    static func providerRows(_ groups: [ProviderGroup], metric: StatsRankMetric = .cost) -> [CompositionRow] {
+        let sorted = ProviderGroup.sorted(groups, by: metric == .tokens ? .tokens : .cost)
         let ranked = sorted.filter { $0.provider != .other }
         let ordered = ranked + sorted.filter { $0.provider == .other }
         return ordered.enumerated().map { index, group in
@@ -390,7 +411,8 @@ enum CompositionBuilder {
     }
 
     static func modelRows(
-        _ modelsByApp: [UsageApp: [String: (totals: UsageTotals, speed: UsageSpeedBreakdown)]]
+        _ modelsByApp: [UsageApp: [String: (totals: UsageTotals, speed: UsageSpeedBreakdown)]],
+        metric: StatsRankMetric = .cost
     ) -> [CompositionRow] {
         struct Merged {
             var totals = UsageTotals.zero
@@ -410,9 +432,9 @@ enum CompositionBuilder {
             }
         }
         let sorted = merged.sorted { lhs, rhs in
-            lhs.value.totals.costUSD == rhs.value.totals.costUSD
-                ? lhs.key < rhs.key
-                : lhs.value.totals.costUSD > rhs.value.totals.costUSD
+            let l = metric.value(lhs.value.totals)
+            let r = metric.value(rhs.value.totals)
+            return l == r ? lhs.key < rhs.key : l > r
         }
         return sorted.enumerated().map { index, element in
             let apps = UsageApp.allCases.filter { element.value.apps.contains($0) }
@@ -431,7 +453,7 @@ enum CompositionBuilder {
         }
     }
 
-    /// `projects` 需已按 `ConversationAggregator.projectOrder` 排好（特殊项目在最后）。
+    /// `projects` 需已按 `ConversationAggregator.projectOrder` 以同一口径排好（特殊项目在最后）。
     static func projectRows(_ projects: [ProjectUsageRow], unattributed: UsageTotals) -> [CompositionRow] {
         var rows = projects.enumerated().map { index, project in
             CompositionRow(
@@ -482,7 +504,7 @@ enum CompositionBuilder {
 
 }
 
-/// 「提供商」分组的排序键；用量构成统一按 API 等值（`.cost`），其余键保留给测试与后续使用。
+/// 「提供商」分组的排序键；用量构成按排行口径取 `.tokens` / `.cost`，其余键保留给测试与后续使用。
 enum ProviderSort: CaseIterable, Identifiable {
     case cost
     case tokens

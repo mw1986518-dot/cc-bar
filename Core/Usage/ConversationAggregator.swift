@@ -10,7 +10,7 @@ final class ConversationAggregator {
     private(set) var revision: UInt64 = 0
 
     @ObservationIgnored private var cachedQuery: (request: ConversationQueryRequest, result: ConversationQueryResult)?
-    @ObservationIgnored private var cachedDetail: (revision: UInt64, key: String, detail: ConversationDetail)?
+    @ObservationIgnored private var cachedDetail: (revision: UInt64, key: String, metric: StatsRankMetric, detail: ConversationDetail)?
     @ObservationIgnored private var cachedOverview: (request: ConversationOverviewRequest, result: ConversationOverviewResult)?
     @ObservationIgnored private var cachedProjectDetail: (request: ProjectDetailRequest, detail: ProjectDetail?)?
     /// worktree → 主仓库的只读识别，按路径缓存；只影响统计口径，不改写已保存的项目身份。
@@ -341,13 +341,10 @@ final class ConversationAggregator {
                 worktreeCount: $0.worktrees.count
             )
         }
-        .sorted(by: Self.projectOrder)
+        .sorted { Self.projectOrder($0, $1, by: request.metric) }
 
         conversations.sort { lhs, rhs in
-            if lhs.summary.costs.total == rhs.summary.costs.total {
-                return lhs.summary.rangeLastAt > rhs.summary.rangeLastAt
-            }
-            return lhs.summary.costs.total > rhs.summary.costs.total
+            Self.conversationOrder(lhs.summary, rhs.summary, by: request.metric)
         }
         let result = ConversationOverviewResult(
             projects: rows,
@@ -439,10 +436,7 @@ final class ConversationAggregator {
             ))
         }
         conversations.sort { lhs, rhs in
-            if lhs.summary.costs.total == rhs.summary.costs.total {
-                return lhs.summary.rangeLastAt > rhs.summary.rangeLastAt
-            }
-            return lhs.summary.costs.total > rhs.summary.costs.total
+            Self.conversationOrder(lhs.summary, rhs.summary, by: request.metric)
         }
 
         var worktrees: [ProjectWorktreeUsage] = []
@@ -457,7 +451,9 @@ final class ConversationAggregator {
                 }
             }
             worktrees.sort { lhs, rhs in
-                lhs.totals.costUSD == rhs.totals.costUSD ? lhs.path < rhs.path : lhs.totals.costUSD > rhs.totals.costUSD
+                let l = request.metric.value(lhs.totals)
+                let r = request.metric.value(rhs.totals)
+                return l == r ? lhs.path < rhs.path : l > r
             }
             worktrees.insert(ProjectWorktreeUsage(
                 path: identity.path,
@@ -476,12 +472,16 @@ final class ConversationAggregator {
             dailyByApp: daily,
             totalsByApp: byApp,
             models: models.values.sorted { lhs, rhs in
-                lhs.totals.costUSD == rhs.totals.costUSD ? lhs.model < rhs.model : lhs.totals.costUSD > rhs.totals.costUSD
+                let l = request.metric.value(lhs.totals)
+                let r = request.metric.value(rhs.totals)
+                return l == r ? lhs.model < rhs.model : l > r
             },
             branches: branches.values.sorted { lhs, rhs in
                 if (lhs.branch == nil) != (rhs.branch == nil) { return lhs.branch != nil }
-                if lhs.totals.costUSD == rhs.totals.costUSD { return (lhs.branch ?? "") < (rhs.branch ?? "") }
-                return lhs.totals.costUSD > rhs.totals.costUSD
+                let l = request.metric.value(lhs.totals)
+                let r = request.metric.value(rhs.totals)
+                if l == r { return (lhs.branch ?? "") < (rhs.branch ?? "") }
+                return l > r
             },
             topConversations: conversations,
             worktrees: worktrees,
@@ -508,13 +508,31 @@ final class ConversationAggregator {
     }
 
     /// 项目排序：API 等值降序，同值按名称；无明确项目与系统任务固定在最后。
-    nonisolated static func projectOrder(_ lhs: ProjectUsageRow, _ rhs: ProjectUsageRow) -> Bool {
+    nonisolated static func projectOrder(
+        _ lhs: ProjectUsageRow,
+        _ rhs: ProjectUsageRow,
+        by metric: StatsRankMetric = .cost
+    ) -> Bool {
         if lhs.isSpecial != rhs.isSpecial { return !lhs.isSpecial }
-        if lhs.totals.costUSD == rhs.totals.costUSD {
+        let l = metric.value(lhs.totals)
+        let r = metric.value(rhs.totals)
+        if l == r {
             if lhs.name == rhs.name { return lhs.key < rhs.key }
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
-        return lhs.totals.costUSD > rhs.totals.costUSD
+        return l > r
+    }
+
+    /// 高消耗对话排序：按口径降序，同值按范围内最后活跃时间倒序。
+    nonisolated static func conversationOrder(
+        _ lhs: ConversationSummary,
+        _ rhs: ConversationSummary,
+        by metric: StatsRankMetric
+    ) -> Bool {
+        let l = metric.value(tokens: lhs.totals.totalTokens, cost: lhs.costs.total)
+        let r = metric.value(tokens: rhs.totals.totalTokens, cost: rhs.costs.total)
+        if l == r { return lhs.rangeLastAt > rhs.rangeLastAt }
+        return l > r
     }
 
     private func resolvedIdentity(for info: ConversationInfo) -> ResolvedIdentity {
@@ -556,8 +574,8 @@ final class ConversationAggregator {
         return totals
     }
 
-    func detail(key: String) -> ConversationDetail? {
-        if let cachedDetail, cachedDetail.revision == revision, cachedDetail.key == key {
+    func detail(key: String, metric: StatsRankMetric = .cost) -> ConversationDetail? {
+        if let cachedDetail, cachedDetail.revision == revision, cachedDetail.key == key, cachedDetail.metric == metric {
             return cachedDetail.detail
         }
         guard let info = infos[key] else { return nil }
@@ -571,8 +589,10 @@ final class ConversationAggregator {
             models.append(ConversationModelSummary(model: model, totals: item.totals, costs: item.costs, speed: item.speed))
         }
         models.sort { lhs, rhs in
-            if lhs.costs.total == rhs.costs.total { return lhs.model < rhs.model }
-            return lhs.costs.total > rhs.costs.total
+            let l = metric.value(tokens: lhs.totals.totalTokens, cost: lhs.costs.total)
+            let r = metric.value(tokens: rhs.totals.totalTokens, cost: rhs.costs.total)
+            if l == r { return lhs.model < rhs.model }
+            return l > r
         }
         let detail = ConversationDetail(
             info: info,
@@ -581,7 +601,7 @@ final class ConversationAggregator {
             speed: overall.speed,
             models: models
         )
-        cachedDetail = (revision, key, detail)
+        cachedDetail = (revision, key, metric, detail)
         return detail
     }
 

@@ -130,6 +130,27 @@ nonisolated struct UsageTotals: Sendable, Equatable {
     }
 }
 
+/// 统计页排行口径（设置项，默认 Tokens）：决定概览构成、高消耗对话、详情子列表的排序与占比，
+/// 以及项目页列表的默认排序。数值相等时各处按名称 / 时间等既有规则稳定排序。
+nonisolated enum StatsRankMetric: String, Sendable, Hashable, CaseIterable, Identifiable {
+    case tokens
+    case cost
+
+    var id: String { rawValue }
+
+    /// 排序比较用的数值；Tokens 转成 `Decimal` 与金额共用比较逻辑。
+    func value(tokens: Int, cost: Decimal) -> Decimal {
+        switch self {
+        case .tokens: return Decimal(tokens)
+        case .cost: return cost
+        }
+    }
+
+    func value(_ totals: UsageTotals) -> Decimal {
+        value(tokens: totals.totalTokens, cost: totals.costUSD)
+    }
+}
+
 /// Standard / Fast / 未识别三档聚合。原始 Tokens 永不乘倍率；Fast 计费等效 Tokens 单独保存。
 nonisolated struct UsageSpeedBreakdown: Sendable, Equatable {
     var standard = UsageTotals.zero

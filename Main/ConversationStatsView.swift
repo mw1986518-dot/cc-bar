@@ -19,7 +19,7 @@ struct ConversationStatsView: View {
     @Binding var customFrom: Date
     @Binding var customTo: Date
     let serviceFilter: StatsServiceFilter
-    /// 从概览 / 项目页跳来的目标（选中对话、按费用排序、按项目筛选），消费后清空。
+    /// 从概览 / 项目页跳来的目标（选中对话、按排行口径排序、按项目筛选），消费后清空。
     @Binding var navigation: StatsNavigationRequest?
 
     @State private var search = ""
@@ -222,7 +222,10 @@ struct ConversationStatsView: View {
     @ViewBuilder
     private func detailPane(_ result: ConversationQueryResult) -> some View {
         if let selection,
-           let detail = appState.usageService.conversationAggregator.detail(key: selection) {
+           let detail = appState.usageService.conversationAggregator.detail(
+               key: selection,
+               metric: SettingsStore.shared.statsRankMetric
+           ) {
             ConversationDetailView(detail: detail)
         } else {
             // 与项目页一致：列表有内容时默认选中第一条，这里只在列表为空时出现。
@@ -306,10 +309,10 @@ struct ConversationStatsView: View {
             search = ""
             projectKey = nil
             selection = key
-        case .conversationsByCost:
+        case .conversationsByRank:
             search = ""
             projectKey = nil
-            sort = .cost
+            sort = SettingsStore.shared.statsRankMetric == .tokens ? .tokens : .cost
         case .conversationsInProject(let key):
             search = ""
             projectKey = key

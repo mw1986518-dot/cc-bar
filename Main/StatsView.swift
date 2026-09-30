@@ -362,7 +362,8 @@ enum StatsViewMode: Hashable, CaseIterable {
 struct StatsNavigationRequest: Equatable {
     enum Target: Equatable {
         case conversation(String)
-        case conversationsByCost
+        /// 对话页按排行口径（Tokens / 费用）排序。
+        case conversationsByRank
         case conversationsInProject(String)
         case projectsList
         case project(String)
@@ -565,7 +566,7 @@ struct StatsView: View {
     private func navigate(_ target: StatsNavigationRequest.Target) {
         pendingNavigation = StatsNavigationRequest(target: target)
         switch target {
-        case .conversation, .conversationsByCost, .conversationsInProject:
+        case .conversation, .conversationsByRank, .conversationsInProject:
             viewMode = .conversations
         case .projectsList, .project, .unattributed:
             viewMode = .projects
@@ -1106,6 +1107,7 @@ struct StatsView: View {
         let current = rangeBounds
         let chart = chartBounds
         let serviceApp = serviceFilter.usageApp
+        let metric = SettingsStore.shared.statsRankMetric
         let input = StatsOverviewInput(
             revision: aggregator.revision,
             current: StatsDateInterval(from: current.from, to: current.to),
@@ -1115,7 +1117,8 @@ struct StatsView: View {
             serviceApp: serviceApp,
             visibleApps: visibleUsageApps,
             highlightedPeriodStart: chartUsesContextWindow ? selectedPeriodStart : nil,
-            conversationRevision: conversations.revision
+            conversationRevision: conversations.revision,
+            rankMetric: metric
         )
         let apps = Set(visibleUsageApps.filter { serviceApp == nil || $0 == serviceApp })
         return overviewCache.model(
@@ -1127,7 +1130,8 @@ struct StatsView: View {
                     from: current.from,
                     to: current.to,
                     apps: apps,
-                    topConversationLimit: 5
+                    topConversationLimit: 5,
+                    metric: metric
                 ))
             }
         )
@@ -1668,7 +1672,7 @@ extension CompositionDimension {
     }
 }
 
-/// 替代原「按服务 / 按提供商 / 按模型」三个面板：一条占比条 + 一张按 API 等值排序的列表，
+/// 替代原「按服务 / 按提供商 / 按模型」三个面板：一条占比条 + 一张按排行口径排序的列表，
 /// 维度在面板标题右侧切换。列表末列为缓存命中率；输入 / 输出 / 缓存读取明细见 Token 拆分面板。
 private struct OverviewCompositionPanel: View {
     let model: StatsOverviewModel
@@ -1967,17 +1971,22 @@ private struct OverviewTopConversationsPanel: View {
             chinese: "高消耗对话",
             right: AnyView(
                 HStack(spacing: 10) {
-                    if let share = model.topConversationsCostShare {
-                        Text(tr(
-                            "Top \(rows.count) = \(StatsFormatter.percent(share)) of cost",
-                            "前 \(rows.count) 个占费用 \(StatsFormatter.percent(share))"
-                        ))
+                    if let share = model.topConversationsShare {
+                        Text(model.rankMetric == .tokens
+                            ? tr(
+                                "Top \(rows.count) = \(StatsFormatter.percent(share)) of tokens",
+                                "前 \(rows.count) 个占 Tokens \(StatsFormatter.percent(share))"
+                            )
+                            : tr(
+                                "Top \(rows.count) = \(StatsFormatter.percent(share)) of cost",
+                                "前 \(rows.count) 个占费用 \(StatsFormatter.percent(share))"
+                            ))
                         .font(.system(size: 10.5))
                         .foregroundStyle(.tertiary)
                         .monospacedDigit()
                     }
                     StatsLinkButton(title: tr("All conversations ›", "全部对话 ›")) {
-                        navigate(.conversationsByCost)
+                        navigate(.conversationsByRank)
                     }
                 }
             ),
@@ -1997,7 +2006,8 @@ private struct OverviewTopConversationsPanel: View {
                             row: row,
                             share: model.share(of: row.summary.totals),
                             barRatio: barRatio(row, first: rows.first),
-                            roomy: true
+                            roomy: true,
+                            metric: model.rankMetric
                         ) {
                             navigate(.conversation(row.id))
                         }
@@ -2008,8 +2018,8 @@ private struct OverviewTopConversationsPanel: View {
     }
 
     private func barRatio(_ row: TopConversationRow, first: TopConversationRow?) -> Double {
-        guard let top = first?.summary.costs.total, top > 0 else { return 0 }
-        return NSDecimalNumber(decimal: row.summary.costs.total / top).doubleValue
+        guard let first else { return 0 }
+        return StatsRankMetric.ratio(row.rankValue(model.rankMetric), to: first.rankValue(model.rankMetric))
     }
 }
 
@@ -2017,13 +2027,15 @@ private struct OverviewTopConversationsPanel: View {
 struct TopConversationRowView: View {
     let index: Int
     let row: TopConversationRow
-    /// 占概览 / 项目 API 等值的比例。
+    /// 占概览 / 项目合计的比例，口径同 `metric`。
     let share: Double
     /// 金额条长度，按第一名归一。
     let barRatio: Double
     var showsProject = true
     /// 概览用：金额条移到标题下方铺满文字列、行距加大，5 行正好填满概览下排。
     var roomy = false
+    /// 排行口径：决定右侧大号数字是 Tokens 还是费用，另一项降为次级。
+    var metric: StatsRankMetric = .cost
     let action: () -> Void
 
     var body: some View {
@@ -2056,10 +2068,10 @@ struct TopConversationRowView: View {
                     amountBar(width: 72, height: 4)
                 }
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text(StatsFormatter.cost(row.summary.costs.total))
+                    Text(metric == .tokens ? tokensText : costText)
                         .font(.system(size: 12.5, weight: .semibold))
                         .monospacedDigit()
-                    Text("\(StatsFormatter.compactToken(row.summary.totals.totalTokens)) · \(StatsFormatter.percent(share))")
+                    Text("\(metric == .tokens ? costText : tokensText) · \(StatsFormatter.percent(share))")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
@@ -2083,6 +2095,9 @@ struct TopConversationRowView: View {
         }
         .frame(width: width, height: height)
     }
+
+    private var costText: String { StatsFormatter.cost(row.summary.costs.total) }
+    private var tokensText: String { StatsFormatter.compactToken(row.summary.totals.totalTokens) }
 
     private var metaLine: String {
         var parts: [String] = []
