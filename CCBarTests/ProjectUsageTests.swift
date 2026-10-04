@@ -198,7 +198,7 @@ final class ProjectUsageTests: XCTestCase {
         let rows = model.composition[.project] ?? []
         XCTAssertEqual(rows.filter { $0.kind == .item }.map(\.title), ["p6", "p5", "p4", "p3"])
         XCTAssertEqual(rows.dropLast(2).count, 4)
-        XCTAssertEqual(rows[4].kind, .rest(count: 3), "p2、p1 与无明确项目并入其余")
+        XCTAssertEqual(rows[4].color, .rest, "p2、p1 与无明确项目并入其余")
         XCTAssertEqual(rows.last?.kind, .unattributed)
         XCTAssertEqual(model.unattributed.totalTokens, 1000)
         XCTAssertEqual(model.unattributed.costUSD, 10)
@@ -230,7 +230,7 @@ final class ProjectUsageTests: XCTestCase {
         let providers = model.composition[.provider] ?? []
         XCTAssertEqual(providers.count, 4)
         XCTAssertEqual(providers.prefix(3).map(\.id), ["provider:openAI", "provider:anthropic", "provider:deepseek"])
-        XCTAssertEqual(providers.last?.kind, .rest(count: 2), "「其他」提供商不参与前 3，与剩余提供商合并")
+        XCTAssertEqual(providers.last?.color, .rest, "「其他」提供商不参与前 3，与剩余提供商合并")
         XCTAssertEqual(providers.last?.totals.costUSD, 34)
 
         let models = model.composition[.model] ?? []
@@ -238,7 +238,7 @@ final class ProjectUsageTests: XCTestCase {
         XCTAssertEqual(models.first?.title, "mystery")
         XCTAssertEqual(models[1].title, "gpt-5", "同名模型跨服务合并")
         XCTAssertEqual(models[1].totals.costUSD, 10)
-        XCTAssertEqual(models.last?.kind, .rest(count: 2), "deepseek-chat 与 opencode-go/kimi 合并为其余 2 个模型")
+        XCTAssertEqual(models.last?.color, .rest, "deepseek-chat 与 opencode-go/kimi 合并为其余 2 个模型")
 
         let services = model.composition[.service] ?? []
         XCTAssertEqual(services.count, UsageApp.allCases.count, "服务维度全部列出")
