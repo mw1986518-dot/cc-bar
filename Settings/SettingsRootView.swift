@@ -50,6 +50,7 @@ struct SettingsRootView: View {
     @State private var pricingCatalogMessageIsError = false
     @State private var showCodexResetCreditsSheet = false
     @State private var showCommandCodeSheet = false
+    @State private var showMimoSheet = false
     @State private var showOtherServices = false
     @State private var isExportingDiagnostics = false
     @State private var diagnosticsMessage: String?
@@ -68,6 +69,9 @@ struct SettingsRootView: View {
         }
         .sheet(isPresented: $showCommandCodeSheet) {
             CommandCodeCredentialSheet()
+        }
+        .sheet(isPresented: $showMimoSheet) {
+            MimoCredentialSheet()
         }
         .confirmationDialog(
             tr("Export diagnostics?", "导出诊断日志？"),
@@ -783,6 +787,18 @@ struct SettingsRootView: View {
                 plan: appState.commandCodeQuota?.planType ?? appState.commandCodeAccount?.planType,
                 signedIn: appState.commandCodeAccount != nil
             )
+        case .kimi:
+            return (
+                email: appState.kimiAccount?.nickname,
+                plan: nil,
+                signedIn: appState.kimiAccount != nil
+            )
+        case .mimo:
+            return (
+                email: nil,
+                plan: appState.mimoAccount?.planName ?? appState.mimoQuota?.planType,
+                signedIn: appState.mimoAccount != nil
+            )
         }
     }
 
@@ -885,6 +901,9 @@ struct SettingsRootView: View {
         case .antigravity, .commandCode:
             usage = nil
             isDetected = info.signedIn
+        case .kimi, .mimo:
+            usage = nil
+            isDetected = info.signedIn
         }
 
         return ServiceEntry(
@@ -899,7 +918,8 @@ struct SettingsRootView: View {
             usage: usage,
             isDetected: isDetected,
             connectHint: connectHint(for: app),
-            connectAccessory: app == .commandCode ? commandCodeManualCredentialButton : nil,
+            connectAccessory: app == .commandCode ? commandCodeManualCredentialButton
+                : app == .mimo ? mimoManualCredentialButton : nil,
             offHint: offHint(for: app),
             isEnabled: serviceEnabledBinding(for: app, settings: settings),
             showInMenuBar: provider.supportsMenuBar ? menuBarBinding(for: app, settings: settings) : nil,
@@ -982,6 +1002,12 @@ struct SettingsRootView: View {
         case .commandCode:
             tr("Reads Command Code's local credentials or the ones you entered, and asks Command Code for remaining quota. Read-only; your sign-in is not changed.",
                "读取 Command Code 的本机凭据或手动填写的凭据，向 Command Code 查询剩余额度。只读取，不改动登录。")
+        case .kimi:
+            tr("Reads the sign-in in ~/.kimi-code and asks Kimi for remaining quota. The 15-minute access token is renewed automatically and written back to the CLI's credential file.",
+               "读取 ~/.kimi-code 的登录状态，向 Kimi 查询剩余额度。15 分钟过期的访问令牌会自动续期并写回 CLI 的凭据文件。")
+        case .mimo:
+            tr("Uses the Xiaomi account Cookie you pasted to read your Token Plan quota from the Xiaomi developer console. Stored in the macOS Keychain; replace it when it expires.",
+               "使用你粘贴的小米账号 Cookie，向小米开放平台查询 Token Plan 套餐额度。Cookie 保存在 macOS 钥匙串中，过期后重新粘贴即可。")
         }
     }
 
@@ -998,6 +1024,10 @@ struct SettingsRootView: View {
             tr("Sign in to the Cursor app to detect it", "登录 Cursor 应用后自动识别")
         case .commandCode:
             tr("Sign in with the Command Code CLI to detect it, or", "登录 Command Code CLI 后自动识别，或")
+        case .kimi:
+            tr("Sign in with the Kimi Code CLI to detect it", "登录 Kimi Code CLI 后自动识别")
+        case .mimo:
+            tr("Paste a Xiaomi account Cookie to enable it", "粘贴小米账号 Cookie 后启用")
         }
     }
 
@@ -1009,6 +1039,10 @@ struct SettingsRootView: View {
                "开启后会读取 Cursor 的登录状态，联网查询额度和用量")
         case .commandCode:
             tr("Turning on fetches Command Code quota online", "开启后会联网查询 Command Code 额度")
+        case .kimi:
+            tr("Turning on reads the Kimi Code CLI sign-in to fetch quota online", "开启后会读取 Kimi Code CLI 的登录状态，联网查询额度")
+        case .mimo:
+            tr("Turning on uses the saved Cookie to fetch MiMo quota online", "开启后会使用已保存的 Cookie 联网查询 MiMo 额度")
         default:
             nil
         }
@@ -1020,6 +1054,8 @@ struct SettingsRootView: View {
             return appState.codexAccount != nil ? AnyView(codexResetCreditsButton) : nil
         case .commandCode:
             return AnyView(commandCodeCredentialButton)
+        case .mimo:
+            return AnyView(mimoCredentialButton)
         default:
             return nil
         }
@@ -1029,6 +1065,17 @@ struct SettingsRootView: View {
         AnyView(
             Button(tr("Enter credentials", "手动填写凭据")) {
                 showCommandCodeSheet = true
+            }
+            .buttonStyle(.link)
+            .font(.system(size: 11))
+            .focusEffectDisabled()
+        )
+    }
+
+    private var mimoManualCredentialButton: AnyView {
+        AnyView(
+            Button(tr("Enter credentials", "手动填写凭据")) {
+                showMimoSheet = true
             }
             .buttonStyle(.link)
             .font(.system(size: 11))
@@ -1047,6 +1094,19 @@ struct SettingsRootView: View {
         .buttonStyle(.plain)
         .focusEffectDisabled()
         .help(tr("Enter Command Code credentials", "填写 Command Code 凭据"))
+    }
+
+    private var mimoCredentialButton: some View {
+        Button {
+            showMimoSheet = true
+        } label: {
+            Image(systemName: "key")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .help(tr("Enter MiMo Token Plan credentials", "填写 MiMo Token Plan 凭据"))
     }
 
     private var codexResetCreditsButton: some View {

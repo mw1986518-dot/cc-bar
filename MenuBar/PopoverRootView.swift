@@ -214,6 +214,14 @@ struct PopoverRootView: View {
             email = appState.commandCodeAccount?.email ?? appState.commandCodeAccount?.login
             plan = appState.commandCodeAccount?.planType ?? appState.quotaSnapshot(for: .commandCode)?.planType
             fallback = "Command Code"
+        case .kimi:
+            email = appState.kimiAccount?.nickname
+            plan = nil
+            fallback = "Moonshot AI"
+        case .mimo:
+            email = nil
+            plan = appState.mimoAccount?.planName ?? appState.quotaSnapshot(for: .mimo)?.planType
+            fallback = "Xiaomi"
         }
         if let email, !email.isEmpty {
             parts.append(privacy ? PrivacyDisplay.account("primary:\(app.rawValue)") : email)
@@ -272,6 +280,8 @@ struct PopoverRootView: View {
         case .antigravity: nil
         case .cursor: cursorTodayCost
         case .commandCode: nil
+        case .kimi: nil
+        case .mimo: nil
         }
     }
 
@@ -286,7 +296,7 @@ struct PopoverRootView: View {
         case .codex: appState.codexServiceStatus
         case .claude: appState.claudeServiceStatus
         case .cursor: appState.cursorServiceStatus
-        case .antigravity, .commandCode: nil
+        case .antigravity, .commandCode, .kimi, .mimo: nil
         }
         guard let status else { return nil }
         // 本机连不上 statuspage 时旧快照仍被保留(刻意的,别的信息还能用),

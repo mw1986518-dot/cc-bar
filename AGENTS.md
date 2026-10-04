@@ -6,7 +6,7 @@
 
 cc-bar 是一个原生 macOS 菜单栏 App，用 Swift / SwiftUI 实现。
 
-- 额度 Provider（`QuotaApp`）：Codex、Claude Code、Antigravity、Cursor、Command Code，外加用户手动导入的其他 Codex 账号。
+- 额度 Provider（`QuotaApp`）：Codex、Claude Code、Antigravity、Cursor、Command Code、Kimi、MiMo，外加用户手动导入的其他 Codex 账号。
 - 本地用量数据源（`UsageApp`）：Codex、Claude Code、Pi、OpenCode 走本机日志扫描，Cursor 走远端计量。
 - 展示位：菜单栏标签、Popover、主窗口（统计 / 设置）、桌面悬浮窗、首次启动引导。
 
@@ -62,7 +62,7 @@ cc-bar 是一个原生 macOS 菜单栏 App，用 Swift / SwiftUI 实现。
   - 图标优先使用 SF Symbols。
   - 界面文案遵守 `设计风格.md` §5.4：标题能说清的不加说明，说明不复述标题，状态提示先说结果再说下一步，涉及隐私和凭据的说法要与代码行为一致。
 - 不自造大面积背景、玻璃阴影、Web 风格控件或无关装饰。
-- 菜单栏和 Popover 中 Provider 顺序固定：Codex → Claude Code → Antigravity → Cursor → Command Code（由 `QuotaProviderDescriptor.allProviders` 定义）。
+- 菜单栏和 Popover 中 Provider 顺序固定：Codex → Claude Code → Antigravity → Cursor → Command Code → Kimi → MiMo（由 `QuotaProviderDescriptor.allProviders` 定义）。
 - 网络请求失败时保留已有快照，不要清空可展示数据。
 - 429 后必须遵守现有退避策略，不要为了手动刷新绕过限流。
 

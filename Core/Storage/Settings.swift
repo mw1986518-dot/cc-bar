@@ -115,6 +115,10 @@ struct ProviderDisplaySettings: Sendable, Codable, Equatable {
             ProviderDisplaySettings(enabled: false, menuBar: false, floatingHUD: false)
         case .commandCode:
             ProviderDisplaySettings(enabled: false, menuBar: true, floatingHUD: true)
+        case .kimi, .mimo:
+            // Kimi / MiMo 是目标用户点名要看的套餐额度：凭据就位（Kimi 读 CLI 文件 /
+            // MiMo 手动粘贴 Cookie）后直接显示，不需要再开一层总开关。
+            ProviderDisplaySettings(enabled: true, menuBar: true, floatingHUD: true)
         }
     }
 }
@@ -157,6 +161,12 @@ final class SettingsStore {
 
     // 运行时 Command Code 账号可用性，由 AppState 的账号检测同步，不持久化。
     var commandCodeAccountDetected: Bool = true
+
+    // 运行时 Kimi 账号可用性，由 AppState 的账号检测同步，不持久化。
+    var kimiAccountDetected: Bool = true
+
+    // 运行时 MiMo 凭据可用性，由 AppState 的账号检测同步，不持久化。
+    var mimoAccountDetected: Bool = true
 
     // Command Code 凭据来源偏好
     var commandCodeCredentialPreference: CommandCodeCredentialPreference {

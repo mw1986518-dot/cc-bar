@@ -29,11 +29,19 @@ final class AppState {
     var commandCodeAccount: CommandCodeAuthSession? {
         didSet { SettingsStore.shared.commandCodeAccountDetected = commandCodeAccount != nil }
     }
+    var kimiAccount: KimiAuthSession? {
+        didSet { SettingsStore.shared.kimiAccountDetected = kimiAccount != nil }
+    }
+    var mimoAccount: MimoAuthSession? {
+        didSet { SettingsStore.shared.mimoAccountDetected = mimoAccount != nil }
+    }
     var codexError: String?
     var claudeError: String?
     var antigravityError: String?
     var cursorError: String?
     var commandCodeError: String?
+    var kimiError: String?
+    var mimoError: String?
 
     // MARK: 导入的 Codex 副账号
     //
@@ -136,6 +144,38 @@ final class AppState {
         get { refreshState(for: .commandCode) }
         set { updatePrimaryState(.commandCode) { $0.refresh = newValue } }
     }
+    var kimiQuota: QuotaSnapshot? {
+        get { quotaSnapshot(for: .kimi) }
+        set { updatePrimaryState(.kimi) { $0.snapshot = newValue } }
+    }
+    var kimiQuotaError: String? {
+        get { quotaError(for: .kimi) }
+        set { updatePrimaryState(.kimi) { $0.error = newValue } }
+    }
+    var kimiQuotaSource: QuotaSnapshotSource? {
+        get { quotaSource(for: .kimi) }
+        set { updatePrimaryState(.kimi) { $0.source = newValue } }
+    }
+    var kimiRefreshState: QuotaRefreshState {
+        get { refreshState(for: .kimi) }
+        set { updatePrimaryState(.kimi) { $0.refresh = newValue } }
+    }
+    var mimoQuota: QuotaSnapshot? {
+        get { quotaSnapshot(for: .mimo) }
+        set { updatePrimaryState(.mimo) { $0.snapshot = newValue } }
+    }
+    var mimoQuotaError: String? {
+        get { quotaError(for: .mimo) }
+        set { updatePrimaryState(.mimo) { $0.error = newValue } }
+    }
+    var mimoQuotaSource: QuotaSnapshotSource? {
+        get { quotaSource(for: .mimo) }
+        set { updatePrimaryState(.mimo) { $0.source = newValue } }
+    }
+    var mimoRefreshState: QuotaRefreshState {
+        get { refreshState(for: .mimo) }
+        set { updatePrimaryState(.mimo) { $0.refresh = newValue } }
+    }
     var quotaHistory = QuotaHistoryPayload()
     var quotaCycles = QuotaCyclePayload()
 
@@ -210,6 +250,8 @@ final class AppState {
         // 是否请求其远端额度仍由 Provider / Stats 开关控制。
         await loadCursor()
         await loadCommandCode()
+        await loadKimi()
+        await loadMimo()
         recordCachedQuotaCycleObservations()
         logCredentialSummary()
 
@@ -295,12 +337,14 @@ final class AppState {
             showCursor: SettingsStore.shared.isProviderEnabled(.cursor)
                 || SettingsStore.shared.isUsageServiceVisible(.cursor),
             showCommandCode: SettingsStore.shared.isProviderEnabled(.commandCode),
+            showKimi: SettingsStore.shared.isProviderEnabled(.kimi),
+            showMimo: SettingsStore.shared.isProviderEnabled(.mimo),
             hasVisibleImported: importedCodexAccounts.contains(where: \.visibleInPopover)
         )
         AppLog.debug(.quota, """
             refresh plan reason=\(reason) codex=\(plan.refreshCodex) claude=\(plan.refreshClaude) \
             antigravity=\(plan.refreshAntigravity) cursor=\(plan.refreshCursor) \
-            commandCode=\(plan.refreshCommandCode) imported=\(plan.refreshImported)
+            commandCode=\(plan.refreshCommandCode) kimi=\(plan.refreshKimi) mimo=\(plan.refreshMimo) imported=\(plan.refreshImported)
             """)
         if plan.refreshCodex {
             await loadCodex()
@@ -325,6 +369,14 @@ final class AppState {
         if plan.refreshCommandCode {
             await loadCommandCode()
             await loadCommandCodeQuota(reason: reason)
+        }
+        if plan.refreshKimi {
+            await loadKimi()
+            await loadKimiQuota(reason: reason)
+        }
+        if plan.refreshMimo {
+            await loadMimo()
+            await loadMimoQuota(reason: reason)
         }
         if plan.refreshImported {
             await loadAllImportedCodexQuotas(
@@ -1392,6 +1444,86 @@ final class AppState {
         saveQuotaCache()
     }
 
+    func loadKimi() async {
+        let next = await Task.detached(priority: .utility) {
+            KimiAuth.load()
+        }.value
+
+        guard var next else {
+            kimiAccount = nil
+            kimiError = "未检测到 Kimi Code 登录态"
+            return
+        }
+
+        // 令牌可能已被 CLI 刷新轮换：同一 refresh_token 沿用上次回填的身份，避免 UI 抖动
+        if let prev = kimiAccount, prev.refreshToken == next.refreshToken {
+            next.nickname = next.nickname ?? prev.nickname
+            next.userID = next.userID ?? prev.userID
+        }
+
+        let changedFromRuntime = kimiAccount.map {
+            $0.accountKey != next.accountKey
+        } ?? false
+        let changedFromCache: Bool = {
+            guard kimiAccount == nil,
+                  let cachedID = quotaCache.kimi?.accountID?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !cachedID.isEmpty
+            else { return false }
+            return cachedID != next.accountKey
+        }()
+        if changedFromRuntime || changedFromCache {
+            resetKimiQuotaState()
+        }
+
+        kimiAccount = next
+        kimiError = nil
+    }
+
+    private func resetKimiQuotaState() {
+        kimiQuota = nil
+        kimiQuotaSource = nil
+        kimiQuotaError = nil
+        kimiRefreshState = QuotaRefreshState()
+        quotaCache.kimi = nil
+        saveQuotaCache()
+    }
+
+    func loadMimo() async {
+        let next = await Task.detached(priority: .utility) {
+            MimoAuth.load()
+        }.value
+
+        guard var next else {
+            mimoAccount = nil
+            mimoError = "未配置 MiMo 登录 Cookie"
+            return
+        }
+
+        // Cookie 未变时沿用上次回填的套餐名，避免 UI 抖动
+        if let prev = mimoAccount, prev.cookie == next.cookie {
+            next.planName = next.planName ?? prev.planName
+        }
+
+        let changedFromRuntime = mimoAccount.map {
+            $0.accountKey != next.accountKey
+        } ?? false
+        if changedFromRuntime {
+            resetMimoQuotaState()
+        }
+
+        mimoAccount = next
+        mimoError = nil
+    }
+
+    private func resetMimoQuotaState() {
+        mimoQuota = nil
+        mimoQuotaSource = nil
+        mimoQuotaError = nil
+        mimoRefreshState = QuotaRefreshState()
+        quotaCache.mimo = nil
+        saveQuotaCache()
+    }
+
     private func loadCodexQuota(reason: QuotaRefreshReason) async {
         guard beginCodexRefresh(reason: reason) else { return }
         defer { codexRefreshState.inFlight = false }
@@ -1691,6 +1823,89 @@ final class AppState {
         }
     }
 
+    private func beginKimiRefresh(reason: QuotaRefreshReason) -> Bool {
+        let now = Date()
+        guard !kimiRefreshState.inFlight else { return false }
+        if let backoffUntil = kimiRefreshState.backoffUntil, backoffUntil > now {
+            markKimiFailure(backoffMessage(until: backoffUntil))
+            return false
+        }
+        if reason == .periodic,
+           let lastSuccessAt = kimiRefreshState.lastSuccessAt,
+           now.timeIntervalSince(lastSuccessAt) < minSuccessInterval
+        {
+            return false
+        }
+        kimiRefreshState.inFlight = true
+        kimiRefreshState.lastAttemptAt = now
+        return true
+    }
+
+    private func loadKimiQuota(reason: QuotaRefreshReason) async {
+        guard beginKimiRefresh(reason: reason) else { return }
+        defer { kimiRefreshState.inFlight = false }
+
+        guard let session = kimiAccount else {
+            markKimiFailure(noAccountMessage)
+            return
+        }
+
+        // Kimi 令牌 15 分钟过期且刷新即轮换：续期与 401 重试都在 Client 内完成，
+        // 这里不再重复 401 重试，失败消息直接透出（续期失败 ≠ 账号失效）。
+        let result = await KimiQuotaClient.fetch(session: session)
+        switch result {
+        case .success(let response):
+            kimiAccount = response.session
+            storeKimi(snapshot: response.snapshot, source: .api)
+        case .failure(let error):
+            markKimiFailure(error.userMessage, error: error)
+        }
+    }
+
+    private func beginMimoRefresh(reason: QuotaRefreshReason) -> Bool {
+        let now = Date()
+        guard !mimoRefreshState.inFlight else { return false }
+        if let backoffUntil = mimoRefreshState.backoffUntil, backoffUntil > now {
+            markMimoFailure(backoffMessage(until: backoffUntil))
+            return false
+        }
+        if reason == .periodic,
+           let lastSuccessAt = mimoRefreshState.lastSuccessAt,
+           now.timeIntervalSince(lastSuccessAt) < minSuccessInterval
+        {
+            return false
+        }
+        mimoRefreshState.inFlight = true
+        mimoRefreshState.lastAttemptAt = now
+        return true
+    }
+
+    private func loadMimoQuota(reason: QuotaRefreshReason) async {
+        guard beginMimoRefresh(reason: reason) else { return }
+        defer { mimoRefreshState.inFlight = false }
+
+        guard let session = mimoAccount else {
+            markMimoFailure(noAccountMessage)
+            return
+        }
+
+        let result = await MimoQuotaClient.fetch(cookie: session.cookie)
+        switch result {
+        case .success(let response):
+            if var current = mimoAccount {
+                current.planName = response.planName ?? current.planName
+                mimoAccount = current
+            }
+            storeMimo(snapshot: response.snapshot, source: .api)
+        case .failure(let error) where error.isAuthFailure && !error.looksLikeInterceptedResponse:
+            markMimoFailure(
+                tr("Sign-in is no longer valid — paste a new Cookie", "登录已失效，请重新粘贴 Cookie"),
+                error: error
+            )
+        case .failure(let error):
+            markMimoFailure(error.userMessage, error: error)
+        }
+    }
     /// Cursor 用量接口同样使用 Cursor.app 的只读登录态。401 时只重读一次 SQLite，
     /// 且 token 必须实际变化才重试；不调用 OAuth refresh，也不影响已成功的额度快照。
     ///
@@ -1951,6 +2166,64 @@ final class AppState {
         }
     }
 
+    private func storeKimi(snapshot: QuotaSnapshot, source: QuotaSnapshotSource) {
+        let updatedAt = Date()
+        let mergedSnapshot = snapshot.preservingFutureResetDates(from: kimiQuota, now: updatedAt)
+        kimiQuota = mergedSnapshot
+        kimiQuotaSource = source
+        kimiQuotaError = nil
+        kimiRefreshState.lastSuccessAt = updatedAt
+        kimiRefreshState.lastError = nil
+        kimiRefreshState.lastErrorIsNetwork = false
+        kimiRefreshState.backoffUntil = nil
+        kimiRefreshState.source = source
+        quotaCache.kimi = QuotaCacheRecord(
+            snapshot: mergedSnapshot,
+            source: source,
+            updatedAt: updatedAt,
+            accountID: kimiAccount?.accountKey
+        )
+        saveQuotaCache()
+    }
+
+    private func markKimiFailure(_ message: String, error: QuotaError? = nil) {
+        kimiQuotaError = message
+        kimiRefreshState.lastError = message
+        kimiRefreshState.lastErrorIsNetwork = error?.isNetworkFailure == true
+        if error?.isRateLimited == true {
+            kimiRefreshState.backoffUntil = Date().addingTimeInterval(rateLimitBackoff)
+        }
+    }
+
+    private func storeMimo(snapshot: QuotaSnapshot, source: QuotaSnapshotSource) {
+        let updatedAt = Date()
+        let mergedSnapshot = snapshot.preservingFutureResetDates(from: mimoQuota, now: updatedAt)
+        mimoQuota = mergedSnapshot
+        mimoQuotaSource = source
+        mimoQuotaError = nil
+        mimoRefreshState.lastSuccessAt = updatedAt
+        mimoRefreshState.lastError = nil
+        mimoRefreshState.lastErrorIsNetwork = false
+        mimoRefreshState.backoffUntil = nil
+        mimoRefreshState.source = source
+        quotaCache.mimo = QuotaCacheRecord(
+            snapshot: mergedSnapshot,
+            source: source,
+            updatedAt: updatedAt,
+            accountID: mimoAccount?.accountKey
+        )
+        saveQuotaCache()
+    }
+
+    private func markMimoFailure(_ message: String, error: QuotaError? = nil) {
+        mimoQuotaError = message
+        mimoRefreshState.lastError = message
+        mimoRefreshState.lastErrorIsNetwork = error?.isNetworkFailure == true
+        if error?.isRateLimited == true {
+            mimoRefreshState.backoffUntil = Date().addingTimeInterval(rateLimitBackoff)
+        }
+    }
+
     private func backoffMessage(until: Date) -> String {
         let remaining = relativeAge(until: until)
         // 不说"限流":那是服务端视角的词。用户看到的事实是请求太频繁、正在等。
@@ -2102,6 +2375,32 @@ final class AppState {
                 lines.append((
                     "commandCode", .warn,
                     "command code fetch failed: \(Redact.message(commandCodeQuotaError ?? commandCodeError))"
+                ))
+            }
+        }
+        if settings.isProviderEnabled(.kimi) {
+            if let q = kimiQuota {
+                lines.append((
+                    "kimi", .info,
+                    "kimi source=\(kimiQuotaSource?.rawValue ?? "—") plan=\(q.planType ?? "—") \(format(q))"
+                ))
+            } else {
+                lines.append((
+                    "kimi", .warn,
+                    "kimi fetch failed: \(Redact.message(kimiQuotaError ?? kimiError))"
+                ))
+            }
+        }
+        if settings.isProviderEnabled(.mimo) {
+            if let q = mimoQuota {
+                lines.append((
+                    "mimo", .info,
+                    "mimo source=\(mimoQuotaSource?.rawValue ?? "—") plan=\(q.planType ?? "—") \(format(q))"
+                ))
+            } else {
+                lines.append((
+                    "mimo", .warn,
+                    "mimo fetch failed: \(Redact.message(mimoQuotaError ?? mimoError))"
                 ))
             }
         }

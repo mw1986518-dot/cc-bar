@@ -125,6 +125,34 @@ final class QuotaRefreshPlanTests: XCTestCase {
         XCTAssertTrue(defaults.floatingHUD)
     }
 
+    func testKimiAndMimoOnly() {
+        let plan = QuotaRefreshPlan.make(
+            showCodex: false,
+            showClaude: false,
+            showCursor: false,
+            showKimi: true,
+            showMimo: true,
+            hasVisibleImported: false
+        )
+
+        XCTAssertFalse(plan.refreshCodex)
+        XCTAssertFalse(plan.refreshClaude)
+        XCTAssertTrue(plan.refreshKimi)
+        XCTAssertTrue(plan.refreshMimo)
+        XCTAssertFalse(plan.refreshImported)
+    }
+
+    func testKimiMimoDisplayDefaultsEnabled() {
+        // Kimi / MiMo 是目标用户点名要看的套餐额度：默认启用，
+        // 与 Cursor / Command Code 的"默认关闭等用户开"不同。
+        for app in [QuotaApp.kimi, .mimo] {
+            let defaults = ProviderDisplaySettings.defaults(for: app)
+            XCTAssertTrue(defaults.enabled)
+            XCTAssertTrue(defaults.menuBar)
+            XCTAssertTrue(defaults.floatingHUD)
+        }
+    }
+
     // MARK: - 镜像判定矩阵（AppState 展示层）
 
     private var appState: AppState!

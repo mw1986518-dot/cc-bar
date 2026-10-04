@@ -227,6 +227,17 @@ enum DiagnosticsBundle {
         } else {
             out.row("command code", "not loaded: \(Redact.message(appState.commandCodeError))")
         }
+        if let k = appState.kimiAccount {
+            out.row("kimi", "account=\(Redact.account(k.nickname))"
+                + " source=\(k.source.displayName)")
+        } else {
+            out.row("kimi", "not loaded: \(Redact.message(appState.kimiError))")
+        }
+        if let m = appState.mimoAccount {
+            out.row("mimo", "source=\(m.source.displayName) plan=\(m.planName ?? "—")")
+        } else {
+            out.row("mimo", "not loaded: \(Redact.message(appState.mimoError))")
+        }
         out.row("imported codex accounts", String(appState.importedCodexAccounts.count))
     }
 

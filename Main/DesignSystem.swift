@@ -89,6 +89,8 @@ extension QuotaApp {
         case .antigravity: .antigravityAccent
         case .cursor: .cursorAccent
         case .commandCode: Color(red: 24 / 255, green: 24 / 255, blue: 27 / 255)
+        case .kimi: Color(red: 108 / 255, green: 92 / 255, blue: 231 / 255)
+        case .mimo: Color(red: 255 / 255, green: 103 / 255, blue: 0 / 255)
         }
     }
 }
